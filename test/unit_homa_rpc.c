@@ -1454,7 +1454,6 @@ TEST_F(homa_rpc, homa_rpc_get_info__basics)
 
 	crpc->completion_cookie = 1111;
 	crpc->msgout.priority = 4;
-	self->hsk.inet.sk.sk_family = AF_INET6;
 
 	homa_rpc_get_info(crpc, &info);
 	EXPECT_EQ(AF_INET6, info.peer.in6.sin6_family);
