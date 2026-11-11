@@ -277,6 +277,9 @@ TEST_F(homa_peer, homa_route_alloc__success)
 	route = homa_route_alloc(&self->hsk, &key);
 	ASSERT_FALSE(IS_ERR(route));
 	EXPECT_EQ_IP(*ip1111, route->flow.u.ip6.daddr);
+	EXPECT_EQ(IPPROTO_UDP, route->flow.u.ip6.flowi6_proto);
+	EXPECT_EQ(HOMA_UDP_PORT, ntohs(route->flow.u.ip6.fl6_sport));
+	EXPECT_EQ(HOMA_UDP_PORT, ntohs(route->flow.u.ip6.fl6_dport));
 	EXPECT_EQ(1, refcount_read(&route->refs));
 	EXPECT_EQ(12345, route->access_jiffies);
 	EXPECT_EQ(1, rcuref_read(&route->dst->__rcuref));
@@ -306,9 +309,12 @@ TEST_F(homa_peer, homa_route_alloc__set_saddr_from_socket)
 
 	/* First try: use IPv4 address. */
 	self->hsk.sock.sk_family = AF_INET;
-	homa_route_key_init(&key, &self->hsk, ip1111);
+	homa_route_key_init(&key, &self->hsk, self->client_ip);
 	route = homa_route_alloc(&self->hsk, &key);
 	EXPECT_STREQ("2.4.6.8", homa_print_ipv6_addr(&route->key.saddr));
+	EXPECT_EQ(IPPROTO_UDP, route->flow.u.ip4.flowi4_proto);
+	EXPECT_EQ(HOMA_UDP_PORT, ntohs(route->flow.u.ip4.fl4_sport));
+	EXPECT_EQ(HOMA_UDP_PORT, ntohs(route->flow.u.ip4.fl4_dport));
 	homa_route_free(&route->rcu_head);
 
 	/* Second try: use IPv4 address. */
@@ -318,6 +324,28 @@ TEST_F(homa_peer, homa_route_alloc__set_saddr_from_socket)
 	EXPECT_STREQ("[6::7:8:9]", homa_print_ipv6_addr(&route->key.saddr));
 	homa_route_free(&route->rcu_head);
 }
+
+#ifndef __STRIP__ /* See strip.py */
+TEST_F(homa_peer, homa_route_xmit__priority_mapped_once)
+{
+	struct homa_busy_hdr busy = {.common = {.type = BUSY}};
+	struct homa_route *route;
+	struct sk_buff *skb;
+
+	route = homa_route_get(&self->hsk, ip1111);
+	ASSERT_FALSE(IS_ERR(route));
+
+	/* Mapping the priority twice would yield 3 instead of 6. */
+	self->homa.priority_map[2] = 6;
+	self->homa.priority_map[6] = 3;
+	skb = __homa_skb_alloc(sizeof(busy));
+	memcpy(skb_put(skb, sizeof(busy)), &busy, sizeof(busy));
+	homa_route_xmit(skb, &self->hsk, route, 2);
+	EXPECT_STREQ("6", mock_xmit_prios);
+	homa_route_release(route);
+}
+#endif /* See strip.py */
+
 TEST_F(homa_peer, homa_route_alloc__route_error_ipv4)
 {
 	struct homa_route_key key;

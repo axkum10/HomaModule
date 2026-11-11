@@ -15,6 +15,11 @@
 /* IANA-assigned Internet Protocol number for Homa. */
 #define IPPROTO_HOMA 146
 
+/* All Homa packets are carried in UDP datagrams whose source and
+ * destination ports are both HOMA_UDP_PORT.
+ */
+#define HOMA_UDP_PORT 5001
+
 /**
  * define HOMA_MAX_MESSAGE_LENGTH - Maximum bytes of payload in a Homa
  * request or response message.

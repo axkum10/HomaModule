@@ -85,7 +85,8 @@ TEST_F(homa_timer, homa_timer_check_rpc__request_ack)
 	homa_timer_check_rpc(srpc);
 	homa_rpc_unlock(srpc);
 	EXPECT_EQ(100, srpc->done_timer_ticks);
-	EXPECT_STREQ("xmit NEED_ACK", unit_log_get());
+	EXPECT_STREQ("padded control packet with 5 bytes; xmit NEED_ACK",
+		     unit_log_get());
 }
 #ifndef __STRIP__ /* See strip.py */
 TEST_F(homa_timer, homa_timer_check_rpc__all_granted_bytes_received)
@@ -278,15 +279,15 @@ TEST_F(homa_timer, homa_timer__reap_dead_rpcs)
 
 	ASSERT_NE(NULL, dead);
 	homa_rpc_end(dead);
-	EXPECT_EQ(16, self->hsk.dead_frags);
+	EXPECT_EQ(17, self->hsk.dead_frags);
 
 	// First call to homa_timer: not enough dead skbs.
-	self->homa.dead_frags_limit = 16;
+	self->homa.dead_frags_limit = 17;
 	homa_timer(&self->homa);
-	EXPECT_EQ(16, self->hsk.dead_frags);
+	EXPECT_EQ(17, self->hsk.dead_frags);
 
 	// Second call to homa_timer: must reap.
-	self->homa.dead_frags_limit = 15;
+	self->homa.dead_frags_limit = 16;
 	homa_timer(&self->homa);
 	EXPECT_EQ(0, self->hsk.dead_frags);
 }

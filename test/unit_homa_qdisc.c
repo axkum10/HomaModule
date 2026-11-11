@@ -29,6 +29,7 @@ static struct sk_buff *new_test_skb(struct homa_rpc *rpc,
 {
 	struct homa_skb_info *info;
 	struct homa_data_hdr data;
+	struct udphdr udp;
 	struct sk_buff *skb;
 
 	data.common = (struct homa_common_hdr){
@@ -38,9 +39,13 @@ static struct sk_buff *new_test_skb(struct homa_rpc *rpc,
 		.sender_id = cpu_to_be64(rpc->id)
 	};
 	data.msg_length = htonl(rpc->msgout.length);
-	data.seg.offset = htonl(offset);
-	skb = mock_raw_skb(saddr, daddr, IPPROTO_HOMA,
-			   sizeof(data) + length + sizeof(*info));
+	data.offset = htonl(offset);
+	udp = (struct udphdr){.source = htons(HOMA_UDP_PORT),
+			      .dest = htons(HOMA_UDP_PORT),
+			      .len = htons(sizeof(udp) + sizeof(data) + length)};
+	skb = mock_raw_skb(saddr, daddr, IPPROTO_UDP,
+			   sizeof(udp) + sizeof(data) + length + sizeof(*info));
+	memcpy(skb_put(skb, sizeof(udp)), &udp, sizeof(udp));
 	memcpy(skb_put(skb, sizeof(data)), &data, sizeof(data));
 	if (length != 0)
 		unit_fill_data(skb_put(skb, length), length, 0);
@@ -674,6 +679,34 @@ TEST_F(homa_qdisc, homa_qdisc_enqueue__short_homa_message)
 	EXPECT_STREQ("", unit_log_get());
 	EXPECT_LT(1000000, atomic64_read(&q->qdev->link_idle_time));
 }
+TEST_F(homa_qdisc, is_homa_pkt__udp_with_other_port_is_not_homa)
+{
+	struct homa_qdisc *q = init_qdisc(self->qdiscs[3]);
+	struct sk_buff *skb, *to_free;
+	struct homa_rpc *crpc;
+
+	crpc = unit_client_rpc(&self->hsk, UNIT_OUTGOING, &self->client_ip,
+			       &self->server_ip, self->server_port,
+			       self->client_id, 7100, 100);
+	ASSERT_NE(NULL, crpc);
+
+	skb = new_test_skb(crpc, &self->addr, &self->addr2, 0, 1500);
+	udp_hdr(skb)->dest = htons(HOMA_UDP_PORT + 1);
+	to_free = NULL;
+	atomic_set(&q->qdev->total_nic_queue, 1500);
+	q->qdev->max_nic_queue_bytes = 1499;
+
+	/* Not a Homa packet, so it is deferred like other non-Homa traffic
+	 * rather than on behalf of an RPC.
+	 */
+	unit_log_clear();
+	EXPECT_EQ(NET_XMIT_SUCCESS, homa_qdisc_enqueue(skb, q->qdisc,
+						       &to_free));
+	EXPECT_EQ(NULL, to_free);
+	EXPECT_EQ(1, skb_queue_len(&q->deferred_tcp));
+	EXPECT_STREQ("", unit_log_deferred(q->qdev));
+	EXPECT_EQ(1, homa_metrics_per_cpu()->qdisc_tcp_packets);
+}
 TEST_F(homa_qdisc, homa_qdisc_enqueue__short_final_packet_in_long_message)
 {
 	struct homa_qdisc *q = init_qdisc(self->qdiscs[3]);
@@ -687,7 +720,7 @@ TEST_F(homa_qdisc, homa_qdisc_enqueue__short_final_packet_in_long_message)
 
 	atomic64_set(&q->qdev->link_idle_time, 1000000);
 	self->data.msg_length = htonl(3000);
-	self->data.seg.offset = htonl(2800);
+	self->data.offset = htonl(2800);
 	skb = new_test_skb(crpc, &self->addr, &self->addr2, 7000, 100);
 	to_free = NULL;
 	unit_log_clear();

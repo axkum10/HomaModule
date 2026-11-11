@@ -8,6 +8,7 @@
 #include "homa_grant.h"
 #include "homa_peer.h"
 #include "homa_rpc.h"
+#include "homa_udp_tunnel.h"
 #include "ccutils.h"
 #define KSELFTEST_NOT_MAIN 1
 #include "kselftest_harness.h"
@@ -17,6 +18,79 @@
 #ifndef __STRIP__ /* See strip.py */
 #include "homa_qdisc.h"
 #endif /* See strip.py */
+
+/**
+ * unit_udp_skb() - Create a UDP datagram containing a Homa packet, in the
+ * form that the UDP stack passes to homa_udp_encap_rcv: skb->data and the
+ * transport header refer to the UDP header.
+ * @saddr:    Source address for the packet.
+ * @daddr:    Destination address for the packet.
+ * @header:   Homa header for the packet; the full header for its type is
+ *            used (see mock_skb_alloc).
+ * @payload:  Number of bytes of data to add after the Homa header.
+ * Return:    The new packet.
+ */
+struct sk_buff *unit_udp_skb(struct in6_addr *saddr, struct in6_addr *daddr,
+			    struct homa_common_hdr *header, int payload)
+{
+	struct sk_buff *inner = mock_skb_alloc(saddr, daddr, header, payload, 0);
+	struct sk_buff *skb = mock_raw_skb(saddr, daddr, IPPROTO_UDP,
+					  sizeof(struct udphdr) + inner->len);
+	struct udphdr *udp = (struct udphdr *)skb_put(skb, sizeof(*udp));
+	int saved_drop_reasons;
+
+	udp->source = htons(HOMA_UDP_PORT);
+	udp->dest = htons(HOMA_UDP_PORT);
+	udp->len = htons(sizeof(*udp) + inner->len);
+	udp->check = htons(0xabcd);
+	memcpy(skb_put(skb, inner->len), inner->data, inner->len);
+
+	/* Freeing the scratch skb is fixture work, not behavior under test,
+	 * so hide the drop reason that it records.
+	 */
+	saved_drop_reasons = mock_num_drop_reasons;
+	kfree_skb(inner);
+	mock_num_drop_reasons = saved_drop_reasons;
+	skb->ip_summed = CHECKSUM_UNNECESSARY;
+	return skb;
+}
+
+/**
+ * unit_gro_skb() - Create a UDP datagram containing a Homa packet, in the
+ * form that the UDP GRO code passes to Homa: skb->data refers to the IP
+ * header and the transport header refers to the UDP header.
+ * @saddr:    Source address for the packet.
+ * @daddr:    Destination address for the packet.
+ * @header:   Homa header for the packet (see unit_udp_skb).
+ * @payload:  Number of bytes of data to add after the Homa header.
+ * Return:    The new packet.
+ */
+struct sk_buff *unit_gro_skb(struct in6_addr *saddr, struct in6_addr *daddr,
+			     struct homa_common_hdr *header, int payload)
+{
+	struct sk_buff *skb = unit_udp_skb(saddr, daddr, header, payload);
+
+	skb_push(skb, mock_ipv6 ? sizeof(struct ipv6hdr) : sizeof(struct iphdr));
+	return skb;
+}
+
+/**
+ * unit_count_drops() - Count the packets that were recorded by the mock
+ * with a real drop reason, ignoring entries for packets that were simply
+ * freed or consumed (SKB_DROP_REASON_NOT_SPECIFIED and
+ * SKB_NOT_DROPPED_YET).
+ * Return: Number of entries in mock_drop_reasons that are real reasons.
+ */
+int unit_count_drops(void)
+{
+	int i, count = 0;
+
+	for (i = 0; i < mock_num_drop_reasons; i++) {
+		if (mock_drop_reasons[i] > SKB_DROP_REASON_NOT_SPECIFIED)
+			count++;
+	}
+	return count;
+}
 
 /**
  * unit_client_rpc() - Create a homa_client_rpc and arrange for it to be
@@ -110,7 +184,7 @@ struct homa_rpc *unit_client_rpc(struct homa_sock *hsk,
 		this_size = resp_length - bytes_received;
 		if (this_size >  UNIT_TEST_DATA_PER_PACKET)
 			this_size = UNIT_TEST_DATA_PER_PACKET;
-		h.seg.offset = htonl(bytes_received);
+		h.offset = htonl(bytes_received);
 		homa_dispatch_pkts(mock_skb_alloc(server_ip, client_ip,
 						  &h.common, this_size, 0));
 	}
@@ -375,7 +449,7 @@ struct homa_rpc *unit_server_rpc(struct homa_sock *hsk,
 
 		if (this_size >  UNIT_TEST_DATA_PER_PACKET)
 			this_size = UNIT_TEST_DATA_PER_PACKET;
-		h.seg.offset = htonl(bytes_received);
+		h.offset = htonl(bytes_received);
 		homa_dispatch_pkts(mock_skb_alloc(client_ip, server_ip,
 						  &h.common, this_size, 0));
 	}
@@ -528,8 +602,8 @@ const char *unit_log_deferred(struct homa_qdisc_dev *qdev)
 		rpc = container_of(node, struct homa_rpc, qrpc.rb_node);
 		unit_log_printf("; ", "[id %llu, offsets", rpc->id);
         	skb_queue_walk(&rpc->qrpc.packets, skb) {
-			h = (struct homa_data_hdr *)skb_transport_header(skb);
-			unit_log_printf(" ", "%d", ntohl(h->seg.offset));
+			h = (struct homa_data_hdr *)homa_header(skb);
+			unit_log_printf(" ", "%d", ntohl(h->offset));
 		}
 		unit_log_printf("", "]");
 	}

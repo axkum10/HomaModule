@@ -3,6 +3,18 @@
 This file contains a terse summary of the packet protocol used by this
 driver for communication between client and server machines.
 
+## UDP encapsulation
+
+Every Homa packet is carried in a UDP datagram (IPv4 or IPv6) whose source
+and destination ports are both `HOMA_UDP_PORT` (5001, defined in homa.h).
+The Homa header immediately follows the UDP header. The port numbers in the
+Homa header are Homa ports, which are independent of the UDP ports. The
+common header is 13 bytes long: sender RPC id (8 bytes), source Homa port
+(2), destination Homa port (2) and packet type (1). The DATA header is 34
+bytes long. Large messages are sent with UDP segmentation offload; each
+segment contains a complete DATA header, and only the IP and UDP headers
+are generated during segmentation.
+
 ## Basics
 Homa implements RPCs (remote procedure calls), in which a client sends
 a *request message* to a server, the server carries out an operation

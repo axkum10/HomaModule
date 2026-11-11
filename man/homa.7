@@ -29,6 +29,9 @@ Protocol,''
 .IR '21) ,
 pp. 773\(en787.
 .PP
+Homa packets are carried in UDP datagrams whose source and destination
+ports are both 5001.
+.PP
 Homa differs from TCP in several respects.
 First, it is message-oriented, whereas TCP is stream-oriented.
 Homa is designed for request-response communication (also known as
@@ -601,16 +604,7 @@ at the GRO level. See code in homa_offload.c for more details.
 .TP
 .IR gso_force_software
 If this value is nonzero, Homa will perform GSO in software instead of
-asking the NIC to perform TSO in hardware. This can be useful when running
-with NICs that refuse to perform TSO on Homa packets.
-.TP
-.IR hijack_tcp
-An integer value; if nonzero, Homa will transmit its packets as TCP
-packets (e.g., using IPPROTO_TCP instead of IPPROTO_HOMA). This allows Homa
-to make better use of NIC hardware support such as TSO and RSS, but it
-requires Homa to intercept all incoming TCP packets to see if they are
-actually Homa packets. Some might object to this interference with the
-rest of the Linux kernel.
+asking the NIC to perform segmentation in hardware.
 .TP
 .IR homa_share
 When there exist both Homa and TCP packets whose transmission has been

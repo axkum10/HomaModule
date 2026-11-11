@@ -139,40 +139,14 @@ feel free to contact me (John Ousterhout, ouster@cs.stanford.edu).
    output packets that are much larger than the network MTU. Once a packet
    has passed through the IP stack and been handed off to the NIC, the
    NIC chops the packet up into multiple smaller packets (segments). This
-   reduces IP stack overhead. Virtually all NICs support segmentation offload
-   for TCP (TSO).  Unfortunately, many NICs will not perform segmentation
-   if the packet transport protocol is unknown, which is the case for
-   Homa. You have three options:
-   * If your NICs were made by Mellanox or NVIDIA, they will segment Homa
-     packets by default. All you need to do is set Homa's `max_gso_size`
-     configuration parameter to a large number on each node:
-     ```
-     sudo sysctl .net.homa.max_gso_size=100000
-     ```
-   * Enable TCP hijacking. Homa has a mode called "TCP hijacking" in which
-     it generates output packets that look like TCP packets and are transmitted
-     using the TCP IP protocol. Since the packets look just like TCP
-     packets, NICs will perform TSO on them. The packets have a few bits
-     set in a way that would never occur with real TCP packets; when
-     the packets reach the destination, Homa recognizes them and "steals"
-     them back so they are processed by Homa and not TCP. You can enable
-     TCP hijacking with the following command:
-     ```
-     sudo sysctl .net.homa.hijack_tcp=1
-     ```
-     Once you have done this, set `max_gso_size` as described above.
-     Unfortunately some datacenters employ security mechanisms in their
-     switches that detect TCP packets that "don't seem right" (e.g.,
-     they don't belong to legitimate connections) and drop them. These filters
-     will discard TCP-encapsulated Homa packets, so hijacking will not work.
-   * As a last resort, use software segmentation (GSO). Linux has a mechanism
-     in which packets can be segmented in software after they have passed
-     through the IP stack. This is not as efficient as TSO in the NIC, but it
-     is still more efficient than passing every MTU-sized packet individually
-     through the network stack. Homa has support for GSO, but unfortunately
-     this support is temporarily broken due to other recent changes. If you
-     need GSO before I get around to fixing it, contact me and I will
-     prioritize the fix.
+   reduces IP stack overhead. Homa packets are UDP packets, so NICs that
+   support UDP segmentation offload will segment them; otherwise Linux
+   segments them in software (GSO). To enable segmentation offload, set
+   Homa's `max_gso_size` configuration parameter to a large number on
+   each node:
+   ```
+   sudo sysctl .net.homa.max_gso_size=100000
+   ```
 
 1. If you are running on Intel CPUs, set the power-saving mode to "performance":
    ```

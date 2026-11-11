@@ -733,13 +733,14 @@ struct homa_rpc *homa_rpc_find_server(struct homa_sock *hsk,
  * associated with the packet and lock it.
  * @skb:        Packet buffer; must contain a Homa packet that is "fully
  *              populated" (e.g. the dev field and IP header are initialized).
+ * @h:          Homa header in @skb.
  * @incoming:   True means this is an incoming packet, false means outgoing.
  * Return:      Pointer an RPC that has been locked; the caller is responsible
  *              for unlocking it. If no RPC could be found, NULL is returned.
  */
-struct homa_rpc *homa_rpc_find_from_skb(struct sk_buff *skb, bool incoming)
+struct homa_rpc *homa_rpc_find_from_skb(struct sk_buff *skb,
+					struct homa_common_hdr *h, bool incoming)
 {
-	struct homa_common_hdr *h;
 	struct homa_sock *hsk;
 	struct homa_net *hnet;
 	struct homa_rpc *rpc;
@@ -747,7 +748,6 @@ struct homa_rpc *homa_rpc_find_from_skb(struct sk_buff *skb, bool incoming)
 	u64 id;
 
 	/* Find the appropriate socket.*/
-	h = (struct homa_common_hdr *)skb_transport_header(skb);
 	id = be64_to_cpu(h->sender_id);
 	if (incoming) {
 		port = ntohs(h->dport);
