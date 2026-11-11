@@ -68,8 +68,7 @@ enum homa_packet_type {
 /**
  * define HOMA_MIN_PKT_LENGTH - Every Homa packet must be padded to at least
  * this length to meet Ethernet frame size limitations. This number includes
- * Homa headers and data, but not UDP, IP or Ethernet headers. The IPv4
- * minimum frame has 46 bytes after Ethernet: 20 IP + 8 UDP + 18 Homa.
+ * Homa headers and data, but not UDP, IP or Ethernet headers.
  */
 #define HOMA_MIN_PKT_LENGTH 18
 

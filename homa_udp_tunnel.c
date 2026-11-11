@@ -165,8 +165,6 @@ void homa_udp_xmit(struct sk_buff *skb, struct homa_sock *hsk,
  * @sk:      Homa's UDP tunnel socket for the namespace.
  * @skb:     Incoming packet, whose UDP checksum has been verified (or which
  *           has no checksum). Its transport header refers to the UDP
- *           header. It may have a frag_list containing more packets (see
- *           homa_gro_receive); for those, skb->data refers to the IP
  *           header. The packet is consumed.
  * Return:   Always 0.
  */
@@ -207,8 +205,7 @@ int homa_udp_encap_rcv(struct sock *sk, struct sk_buff *skb)
  * message arrives for a Homa packet; aborts the RPCs affected by the error.
  * @sk:      Homa's UDP tunnel socket for the namespace.
  * @skb:     The ICMP message; skb->data refers to the IP header of the
- *           original packet (the start of the packet that caused the
- *           error, which the ICMP message carries). Not consumed.
+ *           original packet. Not consumed.
  * @err:     Positive errno derived from the ICMP type and code.
  * @port:    UDP destination port of the original packet.
  * @info:    ICMP information field.

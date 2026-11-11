@@ -31,7 +31,7 @@ struct sk_buff *homa_udp_gro_receive(struct sock *sk,
 /**
  * homa_header() - Return the Homa header of a packet.
  * @skb:     Packet whose transport header refers to its UDP header.
- * Return:   The Homa header, which immediately follows the UDP header.
+ * Return:   The Homa header.
  */
 static inline struct homa_common_hdr *homa_header(struct sk_buff *skb)
 {
