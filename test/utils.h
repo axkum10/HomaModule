@@ -49,6 +49,8 @@ struct homa_rpc
 struct sk_buff *unit_udp_skb(struct in6_addr *saddr, struct in6_addr *daddr,
 			    struct homa_common_hdr *header, int payload);
 int          unit_count_drops(void);
+struct sk_buff *unit_gro_skb(struct in6_addr *saddr, struct in6_addr *daddr,
+			     struct homa_common_hdr *header, int payload);
 int          unit_count_peers(struct homa *homa);
 int          unit_count_routes(struct homa *homa);
 struct in6_addr

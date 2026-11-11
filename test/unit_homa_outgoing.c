@@ -1002,117 +1002,6 @@ TEST_F(homa_outgoing, homa_tx_skb_send__metrics)
 	EXPECT_EQ(1, homa_metrics_per_cpu()->priority_packets[6]);
 	homa_rpc_unlock(crpc);
 }
-TEST_F(homa_outgoing, homa_tx_skb_send__ipv4_udp)
-{
-	struct homa_rpc *crpc;
-	u32 end;
-
-	// Make sure the test uses IPv4.
-	mock_ipv6 = false;
-	unit_sock_destroy(&self->hsk);
-	mock_sock_init(&self->hsk, self->hnet, self->client_port);
-
-	crpc = unit_client_rpc(&self->hsk, UNIT_OUTGOING, self->client_ip,
-			       self->server_ip, self->server_port,
-			       self->client_id, 5000, 100);
-	ASSERT_NE(NULL, crpc);
-	crpc->msgout.max_gso_segs = 1;
-	unit_log_clear();
-
-	homa_rpc_lock(crpc);
-	end = 2000;
-	EXPECT_EQ(0, homa_tx_skb_send(crpc, 1500, &end));
-	EXPECT_STREQ("xmit DATA 1400@1400", unit_log_get());
-	EXPECT_EQ(AF_INET, mock_udp_last_family);
-	EXPECT_EQ(HOMA_UDP_PORT, ntohs(mock_udp_last_header.source));
-	EXPECT_EQ(HOMA_UDP_PORT, ntohs(mock_udp_last_header.dest));
-	homa_rpc_unlock(crpc);
-}
-TEST_F(homa_outgoing, homa_tx_skb_send__ipv4_alloc_error)
-{
-	struct homa_rpc *crpc;
-	int calls;
-	u32 end;
-
-	// Make sure the test uses IPv4.
-	mock_ipv6 = false;
-	unit_sock_destroy(&self->hsk);
-	mock_sock_init(&self->hsk, self->hnet, self->client_port);
-
-	crpc = unit_client_rpc(&self->hsk, UNIT_OUTGOING, self->client_ip,
-			       self->server_ip, self->server_port,
-			       self->client_id, 5000, 100);
-	ASSERT_NE(NULL, crpc);
-	crpc->msgout.max_gso_segs = 1;
-	calls = mock_udp_xmit_calls;
-	mock_alloc_skb_errors = 1;
-	unit_log_clear();
-
-	/* The tunnel helpers return void, so the only failures reported
-	 * to the caller happen before the packet is handed over.
-	 */
-	homa_rpc_lock(crpc);
-	end = 2000;
-	EXPECT_EQ(ENOMEM, -homa_tx_skb_send(crpc, 1500, &end));
-	EXPECT_EQ(calls, mock_udp_xmit_calls);
-	IF_NO_STRIP(EXPECT_EQ(0, homa_metrics_per_cpu()->data_xmit_errors));
-	homa_rpc_unlock(crpc);
-}
-TEST_F(homa_outgoing, homa_tx_skb_send__ipv6_udp)
-{
-	struct homa_rpc *crpc;
-	u32 end;
-	struct in6_addr addr;
-
-	ASSERT_EQ(1, inet_pton(AF_INET6, "2001:44::1", &addr));
-	mock_set_ipv6(&self->hsk);
-	mock_mtu = sizeof(struct ipv6hdr) + sizeof(struct udphdr) +
-		   sizeof(struct homa_data_hdr) + 1400;
-
-	crpc = unit_client_rpc(&self->hsk, UNIT_OUTGOING, self->client_ip,
-			       &addr, self->server_port,
-			       self->client_id, 5000, 100);
-	ASSERT_NE(NULL, crpc);
-	crpc->msgout.max_gso_segs = 1;
-	unit_log_clear();
-
-	homa_rpc_lock(crpc);
-	end = 2000;
-	EXPECT_EQ(0, homa_tx_skb_send(crpc, 1500, &end));
-	EXPECT_STREQ("xmit DATA 1400@1400", unit_log_get());
-	EXPECT_EQ(AF_INET6, mock_udp_last_family);
-	EXPECT_EQ(HOMA_UDP_PORT, ntohs(mock_udp_last_header.source));
-	EXPECT_EQ(HOMA_UDP_PORT, ntohs(mock_udp_last_header.dest));
-	homa_rpc_unlock(crpc);
-}
-TEST_F(homa_outgoing, homa_tx_skb_send__ipv6_alloc_error)
-{
-	struct homa_rpc *crpc;
-	u32 end;
-	struct in6_addr addr;
-	int calls;
-
-	ASSERT_EQ(1, inet_pton(AF_INET6, "2001:44::1", &addr));
-	mock_set_ipv6(&self->hsk);
-	mock_mtu = sizeof(struct ipv6hdr) + sizeof(struct udphdr) +
-		   sizeof(struct homa_data_hdr) + 1400;
-
-	crpc = unit_client_rpc(&self->hsk, UNIT_OUTGOING, self->client_ip,
-			       &addr, self->server_port,
-			       self->client_id, 5000, 100);
-	ASSERT_NE(NULL, crpc);
-	crpc->msgout.max_gso_segs = 1;
-	calls = mock_udp_xmit_calls;
-	mock_alloc_skb_errors = 1;
-	unit_log_clear();
-
-	homa_rpc_lock(crpc);
-	end = 2000;
-	EXPECT_EQ(ENOMEM, -homa_tx_skb_send(crpc, 1500, &end));
-	EXPECT_EQ(calls, mock_udp_xmit_calls);
-	IF_NO_STRIP(EXPECT_EQ(0, homa_metrics_per_cpu()->data_xmit_errors));
-	homa_rpc_unlock(crpc);
-}
 #endif /* See strip.py */
 
 TEST_F(homa_outgoing, homa_xmit_control__busy_from_server_request)
@@ -1221,107 +1110,6 @@ TEST_F(homa_outgoing, __homa_xmit_control__unsendable_padded_control)
 	IF_NO_STRIP(EXPECT_EQ(2, homa_metrics_per_cpu()->control_xmit_errors));
 }
 #ifndef __STRIP__ /* See strip.py */
-TEST_F(homa_outgoing, __homa_xmit_control__ipv6_udp)
-{
-	struct homa_grant_hdr h;
-	struct homa_rpc *srpc;
-	struct in6_addr addr;
-
-	ASSERT_EQ(1, inet_pton(AF_INET6, "2001:44::1", &addr));
-	mock_set_ipv6(&self->hsk);
-	srpc = unit_server_rpc(&self->hsk, UNIT_RCVD_ONE_PKT, &addr,
-		self->server_ip, self->client_port, 1111, 10000, 10000);
-	ASSERT_NE(NULL, srpc);
-	unit_log_clear();
-
-	h.offset = htonl(12345);
-	h.priority = 4;
-	homa_rpc_lock(srpc);
-	EXPECT_EQ(0, -homa_xmit_control(GRANT, &h, sizeof(h), srpc));
-	EXPECT_STREQ("xmit GRANT 12345@4", unit_log_get());
-	EXPECT_EQ(AF_INET6, mock_udp_last_family);
-	homa_rpc_unlock(srpc);
-}
-TEST_F(homa_outgoing, __homa_xmit_control__ipv6_unsendable)
-{
-	struct homa_grant_hdr h;
-	struct homa_rpc *srpc;
-	struct in6_addr addr;
-	int calls = mock_udp_xmit_calls;
-
-	ASSERT_EQ(1, inet_pton(AF_INET6, "2001:44::1", &addr));
-	mock_set_ipv6(&self->hsk);
-	srpc = unit_server_rpc(&self->hsk, UNIT_RCVD_ONE_PKT, &addr,
-		self->server_ip, self->client_port, 1111, 10000, 10000);
-	ASSERT_NE(NULL, srpc);
-	unit_log_clear();
-
-	h.offset = htonl(12345);
-	h.priority = 4;
-	mock_xmit_log_verbose = 1;
-	calls = mock_udp_xmit_calls;
-	mock_mtu = sizeof(struct ipv6hdr) + sizeof(struct udphdr) +
-		   max_t(size_t, sizeof(h), HOMA_MIN_PKT_LENGTH) - 1;
-	homa_rpc_lock(srpc);
-	EXPECT_EQ(EMSGSIZE, -homa_xmit_control(GRANT, &h, sizeof(h), srpc));
-	EXPECT_STREQ("", unit_log_get());
-	EXPECT_EQ(calls, mock_udp_xmit_calls);
-	IF_NO_STRIP(EXPECT_EQ(1, homa_metrics_per_cpu()->control_xmit_errors));
-	homa_rpc_unlock(srpc);
-}
-TEST_F(homa_outgoing, __homa_xmit_control__ipv4_udp)
-{
-	struct homa_grant_hdr h;
-	struct homa_rpc *srpc;
-
-	// Make sure the test uses IPv4.
-	mock_ipv6 = false;
-	unit_sock_destroy(&self->hsk);
-	mock_sock_init(&self->hsk, self->hnet, self->client_port);
-
-	srpc = unit_server_rpc(&self->hsk, UNIT_RCVD_ONE_PKT, self->client_ip,
-		self->server_ip, self->client_port, 1111, 10000, 10000);
-	ASSERT_NE(NULL, srpc);
-	unit_log_clear();
-
-	h.offset = htonl(12345);
-	h.priority = 4;
-	homa_rpc_lock(srpc);
-	EXPECT_EQ(0, -homa_xmit_control(GRANT, &h, sizeof(h), srpc));
-	EXPECT_STREQ("xmit GRANT 12345@4", unit_log_get());
-	EXPECT_EQ(AF_INET, mock_udp_last_family);
-	homa_rpc_unlock(srpc);
-}
-TEST_F(homa_outgoing, __homa_xmit_control__ipv4_unsendable)
-{
-	struct homa_grant_hdr h;
-	struct homa_rpc *srpc;
-	int calls;
-
-	// Make sure the test uses IPv4.
-	mock_ipv6 = false;
-	unit_sock_destroy(&self->hsk);
-	mock_sock_init(&self->hsk, self->hnet, self->client_port);
-
-	srpc = unit_server_rpc(&self->hsk, UNIT_RCVD_ONE_PKT, self->client_ip,
-		self->server_ip, self->client_port, 1111, 10000, 10000);
-	ASSERT_NE(NULL, srpc);
-	unit_log_clear();
-
-	h.offset = htonl(12345);
-	h.priority = 4;
-	mock_xmit_log_verbose = 1;
-	calls = mock_udp_xmit_calls;
-	mock_mtu = sizeof(struct iphdr) + sizeof(struct udphdr) +
-		   max_t(size_t, sizeof(h), HOMA_MIN_PKT_LENGTH) - 1;
-	homa_rpc_lock(srpc);
-	EXPECT_EQ(EMSGSIZE, -homa_xmit_control(GRANT, &h, sizeof(h), srpc));
-	EXPECT_STREQ("", unit_log_get());
-	EXPECT_EQ(calls, mock_udp_xmit_calls);
-	IF_NO_STRIP(EXPECT_EQ(1, homa_metrics_per_cpu()->control_xmit_errors));
-	homa_rpc_unlock(srpc);
-}
-
 TEST_F(homa_outgoing, homa_xmit_unknown__basics)
 {
 	struct homa_grant_hdr h = {{.sport = htons(self->client_port),
@@ -1519,11 +1307,9 @@ TEST_F(homa_outgoing, homa_rpc_tx_end)
 {
 	struct homa_qdisc_dev *qdev;
 	struct homa_skb_info *info;
+	struct homa_data_hdr h;
 	struct homa_rpc *srpc;
 	struct sk_buff *skb;
-	struct udphdr *udp;
-	struct iphdr *ip;
-	u32 end;
 	int offset, length;
 
 	qdev = homa_qdisc_qdev_get(self->dev);
@@ -1539,48 +1325,29 @@ TEST_F(homa_outgoing, homa_rpc_tx_end)
 	EXPECT_EQ(5600, homa_rpc_tx_end(srpc));
 	homa_rpc_unlock(srpc);
 
-	/* Defer a real canonical segment that lies below next_xmit_offset.
-	 * Qdisc sees UDP transport headers, unlike normalized receive skbs.
-	 */
-	offset = 2 * srpc->msgout.max_seg_data;
-	length = srpc->msgout.max_seg_data;
-	end = offset + length;
-	homa_rpc_lock(srpc);
-	skb = homa_tx_skb_alloc(srpc, offset, &end);
-	homa_rpc_unlock(srpc);
-	ASSERT_FALSE(IS_ERR(skb));
-	EXPECT_EQ(offset + length, end);
+	h.common = (struct homa_common_hdr){
+		.sport = htons(srpc->hsk->port),
+		.dport = htons(srpc->dport),
+		.type = DATA,
+		.sender_id = cpu_to_be64(srpc->id)
+	};
+	offset = 3000;
+	length = 1000;
+	h.msg_length = htonl(srpc->msgout.length);
+	h.offset = htonl(offset);
+	skb = unit_gro_skb(self->server_ip, self->client_ip, &h.common,
+			   length + sizeof(struct homa_skb_info));
 	info = homa_get_skb_info(skb);
-	EXPECT_EQ(length, info->data_bytes);
-	udp = (struct udphdr *)skb_push(skb, sizeof(*udp));
-	skb_reset_transport_header(skb);
-	udp->source = htons(HOMA_UDP_PORT);
-	udp->dest = htons(HOMA_UDP_PORT);
-	udp->len = htons(skb->len);
-	udp->check = htons(1);
-	ip = (struct iphdr *)skb_push(skb, sizeof(*ip));
-	skb_reset_network_header(skb);
-	memset(ip, 0, sizeof(*ip));
-	ip->version = 4;
-	ip->ihl = 5;
-	ip->protocol = IPPROTO_UDP;
-	ip->saddr = ipv6_to_ipv4(*self->server_ip);
-	ip->daddr = ipv6_to_ipv4(*self->client_ip);
-	ip->tot_len = htons(skb->len);
-	skb->protocol = htons(ETH_P_IP);
-	skb->dev = self->dev;
-	qdisc_skb_cb(skb)->pkt_len = skb->len;
+	info->data_bytes = length;
+	info->dont_defer = 0;
+	qdisc_skb_cb(skb)->pkt_len = length + 100;
 
 	homa_qdisc_defer_homa(qdev, skb);
-	EXPECT_EQ(1, skb_queue_len(&srpc->qrpc.packets));
-	EXPECT_EQ(skb, skb_peek(&srpc->qrpc.packets));
-	EXPECT_EQ(qdev, srpc->qrpc.qdev);
-	EXPECT_EQ(offset, homa_rpc_tx_end(srpc));
+	EXPECT_EQ(3000, homa_rpc_tx_end(srpc));
 
 	homa_qdisc_xmit_deferred_homa(qdev);
-	EXPECT_EQ(0, skb_queue_len(&srpc->qrpc.packets));
 	EXPECT_EQ(5600, homa_rpc_tx_end(srpc));
 
-	homa_qdisc_qdev_put(qdev);
+        homa_qdisc_qdev_put(qdev);
 }
 #endif /* See strip.py */

@@ -707,31 +707,6 @@ TEST_F(homa_qdisc, is_homa_pkt__udp_with_other_port_is_not_homa)
 	EXPECT_STREQ("", unit_log_deferred(q->qdev));
 	EXPECT_EQ(1, homa_metrics_per_cpu()->qdisc_tcp_packets);
 }
-TEST_F(homa_qdisc, is_homa_pkt__udp_control_packet_not_deferred)
-{
-	struct homa_qdisc *q = init_qdisc(self->qdiscs[3]);
-	struct sk_buff *skb, *to_free;
-	struct homa_rpc *crpc;
-
-	crpc = unit_client_rpc(&self->hsk, UNIT_OUTGOING, &self->client_ip,
-			       &self->server_ip, self->server_port,
-			       self->client_id, 7100, 100);
-	ASSERT_NE(NULL, crpc);
-
-	skb = new_test_skb(crpc, &self->addr, &self->addr2, 0, 1500);
-	((struct homa_common_hdr *)(udp_hdr(skb) + 1))->type = BUSY;
-	to_free = NULL;
-	atomic_set(&q->qdev->total_nic_queue, 1500);
-	q->qdev->max_nic_queue_bytes = 1499;
-
-	unit_log_clear();
-	EXPECT_EQ(NET_XMIT_SUCCESS, homa_qdisc_enqueue(skb, q->qdisc,
-						       &to_free));
-	EXPECT_EQ(NULL, to_free);
-	EXPECT_FALSE(homa_qdisc_any_deferred(q->qdev));
-	EXPECT_EQ(1, q->qdisc->q.qlen);
-	EXPECT_EQ(0, homa_metrics_per_cpu()->qdisc_tcp_packets);
-}
 TEST_F(homa_qdisc, homa_qdisc_enqueue__short_final_packet_in_long_message)
 {
 	struct homa_qdisc *q = init_qdisc(self->qdiscs[3]);

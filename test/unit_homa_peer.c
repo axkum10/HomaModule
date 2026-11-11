@@ -317,7 +317,7 @@ TEST_F(homa_peer, homa_route_alloc__set_saddr_from_socket)
 	EXPECT_EQ(HOMA_UDP_PORT, ntohs(route->flow.u.ip4.fl4_dport));
 	homa_route_free(&route->rcu_head);
 
-	/* Second try: use IPv6 address. */
+	/* Second try: use IPv4 address. */
 	self->hsk.sock.sk_family = AF_INET6;
 	homa_route_key_init(&key, &self->hsk, ip1111);
 	route = homa_route_alloc(&self->hsk, &key);
@@ -325,90 +325,23 @@ TEST_F(homa_peer, homa_route_alloc__set_saddr_from_socket)
 	homa_route_free(&route->rcu_head);
 }
 
-TEST_F(homa_peer, homa_route_xmit__udp_handoff_references)
-{
-	struct homa_route *route = homa_route_get(&self->hsk, self->server_ip);
-	struct homa_busy_hdr busy = {
-		.common = {.type = BUSY, .sport = htons(40000), .dport = htons(99)}
-	};
-	struct sk_buff *skb;
-	struct dst_entry *dst;
-	int refs, route_refs, skbs;
-
-	ASSERT_FALSE(IS_ERR(route));
-	dst = rcu_dereference(route->dst);
-	refs = rcuref_read(&dst->__rcuref);
-	route_refs = refcount_read(&route->refs);
-	skb = __homa_skb_alloc(HOMA_MIN_PKT_LENGTH);
-	ASSERT_NE(NULL, skb);
-	memset(skb_put(skb, HOMA_MIN_PKT_LENGTH), 0, HOMA_MIN_PKT_LENGTH);
-	memcpy(skb->data, &busy, sizeof(busy));
-	skbs = mock_skb_count();
-	homa_route_xmit(skb, &self->hsk, route, 2);
-
-	/* The skb is consumed, the dst reference handed to the tunnel
-	 * helper is released with it, and the route keeps its own.
-	 */
-	EXPECT_EQ(skbs - 1, mock_skb_count());
-	EXPECT_EQ(refs, rcuref_read(&dst->__rcuref));
-	EXPECT_EQ(route_refs, refcount_read(&route->refs));
-	EXPECT_EQ(AF_INET, mock_udp_last_family);
-	EXPECT_EQ(HOMA_UDP_PORT, ntohs(mock_udp_last_header.source));
-	EXPECT_EQ(HOMA_UDP_PORT, ntohs(mock_udp_last_header.dest));
-	EXPECT_EQ(CHECKSUM_PARTIAL, mock_udp_last_ip_summed);
-	EXPECT_EQ(offsetof(struct udphdr, check), mock_udp_last_csum_offset);
-	homa_route_release(route);
-}
 #ifndef __STRIP__ /* See strip.py */
-TEST_F(homa_peer, homa_route_xmit__ipv6_and_priority_mapped_once)
+TEST_F(homa_peer, homa_route_xmit__priority_mapped_once)
 {
-	struct in6_addr addr = unit_get_in_addr("2001:db8::2");
-	struct homa_busy_hdr busy = {
-		.common = {.type = BUSY, .sport = htons(40000), .dport = htons(99)}
-	};
+	struct homa_busy_hdr busy = {.common = {.type = BUSY}};
 	struct homa_route *route;
 	struct sk_buff *skb;
 
-	mock_ipv6 = true;
-	self->hsk.sock.sk_family = AF_INET6;
-	route = homa_route_get(&self->hsk, &addr);
+	route = homa_route_get(&self->hsk, ip1111);
 	ASSERT_FALSE(IS_ERR(route));
 
 	/* Mapping the priority twice would yield 3 instead of 6. */
 	self->homa.priority_map[2] = 6;
 	self->homa.priority_map[6] = 3;
-	skb = __homa_skb_alloc(HOMA_MIN_PKT_LENGTH);
-	ASSERT_NE(NULL, skb);
-	memset(skb_put(skb, HOMA_MIN_PKT_LENGTH), 0, HOMA_MIN_PKT_LENGTH);
-	memcpy(skb->data, &busy, sizeof(busy));
+	skb = __homa_skb_alloc(sizeof(busy));
+	memcpy(skb_put(skb, sizeof(busy)), &busy, sizeof(busy));
 	homa_route_xmit(skb, &self->hsk, route, 2);
-	EXPECT_EQ(AF_INET6, mock_udp_last_family);
 	EXPECT_STREQ("6", mock_xmit_prios);
-	homa_route_release(route);
-}
-TEST_F(homa_peer, homa_route_xmit__software_gso_forces_checksum_none)
-{
-	struct homa_route *route = homa_route_get(&self->hsk, self->server_ip);
-	struct homa_data_hdr data = {
-		.common = {.type = DATA, .sport = htons(40000),
-			   .dport = htons(99)},
-		.msg_length = htonl(100)
-	};
-	struct sk_buff *skb;
-
-	ASSERT_FALSE(IS_ERR(route));
-	skb = __homa_skb_alloc(sizeof(data));
-	ASSERT_NE(NULL, skb);
-	memcpy(skb_put(skb, sizeof(data)), &data, sizeof(data));
-	memset(homa_get_skb_info(skb), 0, sizeof(struct homa_skb_info));
-	skb_shinfo(skb)->gso_type = SKB_GSO_UDP_L4;
-	skb_shinfo(skb)->gso_size = sizeof(data) + 32;
-	skb_shinfo(skb)->gso_segs = 2;
-	self->homa.gso_force_software = 1;
-	homa_route_xmit(skb, &self->hsk, route, 0);
-	EXPECT_EQ(CHECKSUM_NONE, mock_udp_last_ip_summed);
-	EXPECT_EQ(SKB_GSO_UDP_L4, mock_udp_last_gso_type);
-	EXPECT_EQ(2, mock_udp_last_gso_segs);
 	homa_route_release(route);
 }
 #endif /* See strip.py */

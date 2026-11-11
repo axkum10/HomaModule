@@ -243,10 +243,6 @@ extern int         mock_udp_last_family;
 extern int         mock_udp_last_tos;
 extern int         mock_udp_last_ip_summed;
 extern int         mock_udp_last_csum_offset;
-extern unsigned int mock_udp_last_gso_type;
-extern unsigned int mock_udp_last_gso_size;
-extern unsigned int mock_udp_last_gso_segs;
-extern int         mock_udp_last_data_bytes;
 
 extern struct task_struct *current_task;
 

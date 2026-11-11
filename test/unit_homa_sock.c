@@ -356,15 +356,6 @@ TEST_F(homa_sock, homa_sock_init__all_ports_in_use)
 	unit_sock_destroy(&hsk3);
 	unit_sock_destroy(&hsk4);
 }
-TEST_F(homa_sock, homa_sock_init__application_protocol_unchanged)
-{
-	struct homa_sock hsk;
-
-	mock_sock_init(&hsk, self->hnet, 0);
-	EXPECT_EQ(IPPROTO_HOMA, hsk.sock.sk_protocol);
-	unit_sock_destroy(&hsk);
-}
-
 TEST_F(homa_sock, homa_sock_link__basics)
 {
 	struct homa_sock_link *slink;

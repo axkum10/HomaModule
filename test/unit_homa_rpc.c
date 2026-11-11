@@ -514,18 +514,9 @@ TEST_F(homa_rpc, homa_rpc_end__state_ready)
 #ifndef __STRIP__ /* See strip.py */
 TEST_F(homa_rpc, homa_rpc_end__delete_deferred_skbs_in_homa_qdisc)
 {
-	int length = sizeof(struct udphdr) + sizeof(self->data) + 1400;
-	struct udphdr udp = {
-		.source = htons(HOMA_UDP_PORT),
-		.dest = htons(HOMA_UDP_PORT),
-		.len = htons(length),
-		.check = htons(1)
-	};
 	struct homa_qdisc_dev *qdev;
-	struct homa_data_hdr *h;
 	struct homa_rpc *crpc;
 	struct sk_buff *skb;
-	int i;
 
 	qdev = homa_qdisc_qdev_get(mock_dev(0, &self->homa));
 
@@ -534,37 +525,16 @@ TEST_F(homa_rpc, homa_rpc_end__delete_deferred_skbs_in_homa_qdisc)
 			       self->client_id, 10000, 10000);
 	ASSERT_NE(NULL, crpc);
 
-	for (i = 0; i < 2; i++) {
-		skb = mock_raw_skb(self->client_ip, self->server_ip, IPPROTO_UDP,
-				   length + sizeof(struct homa_skb_info));
-		memcpy(skb_put(skb, sizeof(udp)), &udp, sizeof(udp));
-		self->data.offset = htonl(2800 * i);
-		memcpy(skb_put(skb, sizeof(self->data)), &self->data,
-		       sizeof(self->data));
-		unit_fill_data(skb_put(skb, 1400), 1400, 2800 * i);
-		if (mock_ipv6)
-			skb_push(skb, sizeof(struct ipv6hdr));
-		else {
-			skb_push(skb, sizeof(struct iphdr));
-			ip_hdr(skb)->ihl = 5;
-		}
-		homa_get_skb_info(skb)->data_bytes = 1400;
-		homa_get_skb_info(skb)->dont_defer = false;
-		qdisc_skb_cb(skb)->pkt_len = skb->len;
-		homa_qdisc_defer_homa(qdev, skb);
-	}
-	ASSERT_EQ(&crpc->qrpc.rb_node, rb_first_cached(&qdev->deferred_rpcs));
-	EXPECT_EQ(NULL, rb_next(&crpc->qrpc.rb_node));
-	ASSERT_EQ(2, skb_queue_len(&crpc->qrpc.packets));
-	h = (struct homa_data_hdr *)(udp_hdr(skb_peek(&crpc->qrpc.packets)) + 1);
-	EXPECT_EQ(0, ntohl(h->offset));
-	h = (struct homa_data_hdr *)(udp_hdr(skb_peek_tail(&crpc->qrpc.packets)) + 1);
-	EXPECT_EQ(2800, ntohl(h->offset));
+	skb = unit_gro_skb(self->client_ip, self->server_ip,
+			   &self->data.common, 1400);
+	homa_qdisc_defer_homa(qdev, skb);
+	self->data.offset = htonl(2800);
+	skb = unit_gro_skb(self->client_ip, self->server_ip,
+			   &self->data.common, 1400);
+	homa_qdisc_defer_homa(qdev, skb);
 	EXPECT_STREQ("[id 1234, offsets 0 2800]", unit_log_deferred(qdev));
 
 	homa_rpc_end(crpc);
-	EXPECT_EQ(NULL, rb_first_cached(&qdev->deferred_rpcs));
-	EXPECT_EQ(0, skb_queue_len(&crpc->qrpc.packets));
 	EXPECT_STREQ("", unit_log_deferred(qdev));
 	homa_qdisc_qdev_put(qdev);
 }

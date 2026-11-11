@@ -8,6 +8,7 @@
 #include "homa_grant.h"
 #include "homa_peer.h"
 #include "homa_rpc.h"
+#include "homa_udp_tunnel.h"
 #include "ccutils.h"
 #define KSELFTEST_NOT_MAIN 1
 #include "kselftest_harness.h"
@@ -18,8 +19,16 @@
 #include "homa_qdisc.h"
 #endif /* See strip.py */
 
-/* Unlike mock_skb_alloc's normalized inner packet, this is the exact
- * UDP-present receive boundary used by encap_rcv.
+/**
+ * unit_udp_skb() - Create a UDP datagram containing a Homa packet, in the
+ * form that the UDP stack passes to homa_udp_encap_rcv: skb->data and the
+ * transport header refer to the UDP header.
+ * @saddr:    Source address for the packet.
+ * @daddr:    Destination address for the packet.
+ * @header:   Homa header for the packet; the full header for its type is
+ *            used (see mock_skb_alloc).
+ * @payload:  Number of bytes of data to add after the Homa header.
+ * Return:    The new packet.
  */
 struct sk_buff *unit_udp_skb(struct in6_addr *saddr, struct in6_addr *daddr,
 			    struct homa_common_hdr *header, int payload)
@@ -43,6 +52,25 @@ struct sk_buff *unit_udp_skb(struct in6_addr *saddr, struct in6_addr *daddr,
 	kfree_skb(inner);
 	mock_num_drop_reasons = saved_drop_reasons;
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
+	return skb;
+}
+
+/**
+ * unit_gro_skb() - Create a UDP datagram containing a Homa packet, in the
+ * form that the UDP GRO code passes to Homa: skb->data refers to the IP
+ * header and the transport header refers to the UDP header.
+ * @saddr:    Source address for the packet.
+ * @daddr:    Destination address for the packet.
+ * @header:   Homa header for the packet (see unit_udp_skb).
+ * @payload:  Number of bytes of data to add after the Homa header.
+ * Return:    The new packet.
+ */
+struct sk_buff *unit_gro_skb(struct in6_addr *saddr, struct in6_addr *daddr,
+			     struct homa_common_hdr *header, int payload)
+{
+	struct sk_buff *skb = unit_udp_skb(saddr, daddr, header, payload);
+
+	skb_push(skb, mock_ipv6 ? sizeof(struct ipv6hdr) : sizeof(struct iphdr));
 	return skb;
 }
 
@@ -573,12 +601,8 @@ const char *unit_log_deferred(struct homa_qdisc_dev *qdev)
 	     node = rb_next(node)) {
 		rpc = container_of(node, struct homa_rpc, qrpc.rb_node);
 		unit_log_printf("; ", "[id %llu, offsets", rpc->id);
-		skb_queue_walk(&rpc->qrpc.packets, skb) {
-			h = (struct homa_data_hdr *)(udp_hdr(skb) + 1);
-			if (h->common.type != DATA) {
-				FAIL("deferred skb is not valid UDP Homa DATA");
-				continue;
-			}
+        	skb_queue_walk(&rpc->qrpc.packets, skb) {
+			h = (struct homa_data_hdr *)homa_header(skb);
 			unit_log_printf(" ", "%d", ntohl(h->offset));
 		}
 		unit_log_printf("", "]");

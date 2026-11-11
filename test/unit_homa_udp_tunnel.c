@@ -8,22 +8,13 @@
 #define KSELFTEST_NOT_MAIN 1
 #include "kselftest_harness.h"
 #include "ccutils.h"
+#include "mock.h"
 #include "utils.h"
 
 #ifndef __STRIP__ /* See strip.py */
 #include "homa_offload.h"
 
-static const int control_header_lengths[] = {
-	sizeof(struct homa_grant_hdr),
-	sizeof(struct homa_resend_hdr),
-	sizeof(struct homa_rpc_unknown_hdr),
-	sizeof(struct homa_busy_hdr),
-	sizeof(struct homa_cutoffs_hdr),
-	sizeof(struct homa_freeze_hdr),
-	sizeof(struct homa_need_ack_hdr),
-	sizeof(struct homa_ack_hdr),
-	sizeof(struct homa_start_msg_hdr)
-};
+#define cur_offload_core (&per_cpu(homa_offload_core, smp_processor_id()))
 #endif /* See strip.py */
 
 FIXTURE(homa_udp_tunnel) {
@@ -57,7 +48,27 @@ FIXTURE_TEARDOWN(homa_udp_tunnel)
 	unit_teardown();
 }
 
-TEST_F(homa_udp_tunnel, socket_pair_and_checksum_policy)
+/**
+ * tx_skb() - Create an outgoing Homa DATA packet with the headroom and
+ * layout that the real packet builders produce (skb->data at the Homa
+ * header).
+ * @header:  Homa DATA header to copy.
+ * @payload: Number of data bytes to add after the header.
+ * Return:   The new packet.
+ */
+static struct sk_buff *tx_skb(struct homa_data_hdr *header, int payload)
+{
+	struct sk_buff *skb;
+
+	skb = __homa_skb_alloc(sizeof(*header) + payload);
+	memcpy(skb_put(skb, sizeof(*header)), header, sizeof(*header));
+	memset(skb_put(skb, payload), 0, payload);
+	memset(homa_get_skb_info(skb), 0, sizeof(struct homa_skb_info));
+	homa_get_skb_info(skb)->data_bytes = payload;
+	return skb;
+}
+
+TEST_F(homa_udp_tunnel, homa_udp_init__basics)
 {
 	struct socket *udp4 = rcu_access_pointer(self->hnet->udp4);
 	struct socket *udp6 = rcu_access_pointer(self->hnet->udp6);
@@ -80,13 +91,10 @@ TEST_F(homa_udp_tunnel, socket_pair_and_checksum_policy)
 	EXPECT_EQ(&homa_udp_gro_receive, udp_sk(udp6->sk)->gro_receive);
 	EXPECT_EQ(&homa_udp_gro_complete, udp_sk(udp6->sk)->gro_complete);
 #endif /* See strip.py */
-
-	/* Both sockets are published with the namespace. */
 	EXPECT_EQ(self->hnet, udp4->sk->sk_user_data);
 	EXPECT_EQ(self->hnet, udp6->sk->sk_user_data);
 }
-
-TEST_F(homa_udp_tunnel, first_socket_failure_preserves_error)
+TEST_F(homa_udp_tunnel, homa_udp_init__create_ipv4_socket_fails)
 {
 	struct homa_net fresh;
 	int releases = mock_udp_release_calls;
@@ -99,8 +107,7 @@ TEST_F(homa_udp_tunnel, first_socket_failure_preserves_error)
 	EXPECT_EQ(NULL, rcu_access_pointer(fresh.udp6));
 	EXPECT_EQ(releases, mock_udp_release_calls);
 }
-
-TEST_F(homa_udp_tunnel, second_socket_failure_unwinds_once)
+TEST_F(homa_udp_tunnel, homa_udp_init__create_ipv6_socket_fails)
 {
 	struct homa_net fresh;
 	int releases = mock_udp_release_calls;
@@ -112,408 +119,26 @@ TEST_F(homa_udp_tunnel, second_socket_failure_unwinds_once)
 	EXPECT_EQ(NULL, rcu_access_pointer(fresh.udp4));
 	EXPECT_EQ(NULL, rcu_access_pointer(fresh.udp6));
 	EXPECT_EQ(releases + 1, mock_udp_release_calls);
-	homa_udp_destroy(&fresh);
-	EXPECT_EQ(releases + 1, mock_udp_release_calls);
 }
 
-TEST_F(homa_udp_tunnel, net_start_failure_unwinds_without_double_release)
+TEST_F(homa_udp_tunnel, homa_udp_destroy__basics)
 {
 	struct homa_net fresh;
 	int releases = mock_udp_release_calls;
 
-	/* homa_net_start destroys the homa_net when homa_udp_init fails. */
 	homa_net_init(&fresh, &self->homa);
-	mock_udp_create_errors = 2;
-	EXPECT_EQ(-EADDRINUSE, homa_udp_init(&fresh, &mock_nets[0]));
-	homa_net_destroy(&fresh);
-	EXPECT_EQ(releases + 1, mock_udp_release_calls);
+	ASSERT_EQ(0, homa_udp_init(&fresh, &mock_nets[0]));
+	homa_udp_destroy(&fresh);
+	EXPECT_EQ(releases + 2, mock_udp_release_calls);
+	EXPECT_EQ(NULL, rcu_access_pointer(fresh.udp4));
+	EXPECT_EQ(NULL, rcu_access_pointer(fresh.udp6));
+
+	/* A second call finds nothing left to release. */
+	homa_udp_destroy(&fresh);
+	EXPECT_EQ(releases + 2, mock_udp_release_calls);
 }
 
-TEST_F(homa_udp_tunnel, receive_both_families_dispatches_inner_homa)
-{
-	int i;
-
-	for (i = 0; i < 2; i++) {
-		struct socket *socket = i ? rcu_access_pointer(self->hnet->udp6) :
-					   rcu_access_pointer(self->hnet->udp4);
-		struct homa_rpc *rpc;
-		struct sk_buff *skb;
-		int count = mock_skb_count();
-
-		mock_ipv6 = i;
-		self->client = unit_get_in_addr(i ? "2001:db8::1" : "1.2.3.4");
-		self->server = unit_get_in_addr(i ? "2001:db8::2" : "5.6.7.8");
-		self->hsk.sock.sk_family = i ? AF_INET6 : AF_INET;
-		self->data.common.sender_id = cpu_to_be64(100 + 2 * i);
-		skb = unit_udp_skb(&self->client, &self->server,
-				   &self->data.common, 64);
-		EXPECT_EQ(sizeof(struct udphdr) + sizeof(self->data) + 64,
-			  skb->len);
-		EXPECT_EQ(htons(HOMA_UDP_PORT), udp_hdr(skb)->source);
-		EXPECT_EQ(htons(HOMA_UDP_PORT), udp_hdr(skb)->dest);
-		/* Keep an inspection reference across the consuming callback. */
-		skb_get(skb);
-		EXPECT_EQ(0, udp_sk(socket->sk)->encap_rcv(socket->sk, skb));
-		EXPECT_EQ(i + 1, unit_list_length(&self->hsk.active_rpcs));
-		IF_NO_STRIP(EXPECT_EQ(i + 1,
-			homa_metrics_per_cpu()->packets_received[DATA - DATA]));
-		EXPECT_EQ((void *)skb->data, (void *)homa_header(skb));
-		EXPECT_EQ(sizeof(self->data) + 64, skb->len);
-		EXPECT_EQ(i, skb_is_ipv6(skb));
-		EXPECT_EQ(0, memcmp(&self->data, skb->data, sizeof(self->data)));
-		EXPECT_EQ(2, refcount_read(&skb->users));
-		EXPECT_EQ(count + 1, mock_skb_count());
-		rpc = homa_rpc_find_server(&self->hsk, &self->client, 101 + 2 * i);
-		ASSERT_NE(NULL, rpc);
-		EXPECT_EQ(40000, rpc->dport);
-		EXPECT_EQ(64, rpc->msgin.length);
-		EXPECT_EQ(0, rpc->msgin.bytes_remaining);
-		EXPECT_EQ(skb, skb_peek(&rpc->msgin.packets));
-		EXPECT_TRUE(ipv6_addr_equal(&self->client,
-					   &rpc->route->peer->addr));
-		homa_rpc_unlock(rpc);
-		kfree_skb(skb);
-		EXPECT_EQ(count + 1, mock_skb_count());
-	}
-	IF_NO_STRIP(EXPECT_EQ(2, homa_metrics_per_cpu()->softirq_calls));
-}
-
-#ifndef __STRIP__ /* See strip.py */
-static void receive_control_types(struct __test_metadata *_metadata,
-				 FIXTURE_DATA(homa_udp_tunnel) *self, int family)
-{
-	struct homa_route *route;
-	struct socket *socket;
-	int type;
-
-	mock_ipv6 = family == AF_INET6;
-	self->hsk.sock.sk_family = family;
-	self->client = unit_get_in_addr(mock_ipv6 ? "2001:db8::1" : "1.2.3.4");
-	self->server = unit_get_in_addr(mock_ipv6 ? "2001:db8::2" : "5.6.7.8");
-	socket = mock_ipv6 ? rcu_access_pointer(self->hnet->udp6) :
-			     rcu_access_pointer(self->hnet->udp4);
-	ASSERT_EQ(family, socket->sk->sk_family);
-	route = homa_route_get(&self->hsk, &self->client);
-	ASSERT_FALSE(IS_ERR(route));
-	mock_xmit_log_verbose = 1;
-	for (type = GRANT; type <= MAX_OP; type++) {
-		union {
-			struct homa_common_hdr common;
-			struct homa_grant_hdr grant;
-			struct homa_resend_hdr resend;
-			struct homa_cutoffs_hdr cutoffs;
-			struct homa_ack_hdr ack;
-			struct homa_start_msg_hdr start;
-		} packet = {};
-		struct homa_rpc *rpc = NULL;
-		struct sk_buff *skb;
-		int header_length = control_header_lengths[type - GRANT];
-		int length = max_t(int, header_length, HOMA_MIN_PKT_LENGTH);
-		int id = 100 + 2 * (type - GRANT);
-		int active, count, calls;
-		u64 received, softirqs;
-
-		packet.common = self->data.common;
-		packet.common.type = type;
-		packet.common.sender_id = cpu_to_be64(id);
-		switch (type) {
-		case GRANT:
-			rpc = unit_server_rpc(&self->hsk, UNIT_OUTGOING,
-					&self->client, &self->server, 40000,
-					id ^ 1, 64, 256);
-			ASSERT_NE(NULL, rpc);
-			rpc->msgout.granted = 0;
-			rpc->silent_ticks = 17;
-			packet.grant.offset = htonl(128);
-			packet.grant.priority = 3;
-			break;
-		case RESEND:
-			packet.resend.offset = htonl(32);
-			packet.resend.length = htonl(64);
-			packet.resend.priority = 2;
-			break;
-		case RPC_UNKNOWN:
-		case BUSY:
-		case ACK:
-			self->data.common.sender_id = packet.common.sender_id;
-			rpc = homa_rpc_alloc_server(&self->hsk, &self->client,
-						   &self->data.common);
-			ASSERT_FALSE(IS_ERR(rpc));
-			rpc->silent_ticks = 17;
-			homa_rpc_unlock(rpc);
-			break;
-		case CUTOFFS:
-			packet.cutoffs.unsched_cutoffs[1] = htonl(900);
-			packet.cutoffs.unsched_cutoffs[7] = htonl(100);
-			packet.cutoffs.cutoff_version = htons(7);
-			break;
-		case FREEZE:
-			ASSERT_EQ(0, tt_init(NULL));
-			EXPECT_EQ(0, atomic_read(&tt_frozen));
-			break;
-		case NEED_ACK:
-			/* A server requests an ACK from a client with no RPC. */
-			packet.common.sender_id = cpu_to_be64(id | 1);
-			break;
-		case START_MSG:
-			packet.start.msg_length = htonl(64);
-			break;
-		}
-		active = unit_list_length(&self->hsk.active_rpcs);
-		count = mock_skb_count();
-		calls = mock_udp_xmit_calls;
-		received = homa_metrics_per_cpu()->packets_received[type - DATA];
-		softirqs = homa_metrics_per_cpu()->softirq_calls;
-		skb = unit_udp_skb(&self->client, &self->server, &packet.common,
-				   length - header_length);
-		EXPECT_EQ(sizeof(struct udphdr) + length, skb->len);
-		EXPECT_EQ(htons(HOMA_UDP_PORT), udp_hdr(skb)->source);
-		EXPECT_EQ(htons(HOMA_UDP_PORT), udp_hdr(skb)->dest);
-		EXPECT_EQ(skb->len, ntohs(udp_hdr(skb)->len));
-		EXPECT_EQ(CHECKSUM_UNNECESSARY, (int)skb->ip_summed);
-		skb_get(skb);
-		unit_log_clear();
-		EXPECT_EQ(0, udp_sk(socket->sk)->encap_rcv(socket->sk, skb));
-		EXPECT_EQ(softirqs + 1, homa_metrics_per_cpu()->softirq_calls);
-		EXPECT_EQ(received + (type != FREEZE),
-			  homa_metrics_per_cpu()->packets_received[type - DATA]);
-		EXPECT_EQ(0, homa_metrics_per_cpu()->short_packets);
-		EXPECT_EQ(0, homa_metrics_per_cpu()->unknown_rpcs);
-		EXPECT_EQ(0, homa_metrics_per_cpu()->unknown_packet_types);
-		EXPECT_EQ((void *)skb->data, (void *)homa_header(skb));
-		EXPECT_EQ(length, skb->len);
-		EXPECT_EQ(family == AF_INET6, skb_is_ipv6(skb));
-		EXPECT_EQ(mock_ipv6 ? sizeof(struct ipv6hdr) :
-				      sizeof(struct iphdr),
-			  skb_transport_header(skb) - skb_network_header(skb));
-		EXPECT_EQ(0, memcmp(&packet, skb->data, header_length));
-		EXPECT_EQ(1, refcount_read(&skb->users));
-		EXPECT_EQ(count + 1, mock_skb_count());
-		switch (type) {
-		case GRANT:
-			EXPECT_EQ(128, rpc->msgout.granted);
-			EXPECT_EQ(3, rpc->msgout.priority);
-			EXPECT_EQ(0, rpc->silent_ticks);
-			break;
-		case RESEND:
-		case NEED_ACK: {
-			char expected[80];
-
-			EXPECT_EQ(calls + 1, mock_udp_xmit_calls);
-			EXPECT_EQ(family, mock_udp_last_family);
-			EXPECT_EQ(htons(HOMA_UDP_PORT), mock_udp_last_header.source);
-			EXPECT_EQ(htons(HOMA_UDP_PORT), mock_udp_last_header.dest);
-			EXPECT_SUBSTR(type == RESEND ? "xmit RPC_UNKNOWN" :
-						      "xmit ACK", unit_log_get());
-			snprintf(expected, sizeof(expected), "dport 40000, id %llu",
-				 (unsigned long long)homa_local_id(
-					 packet.common.sender_id));
-			EXPECT_SUBSTR(expected, unit_log_get());
-			break;
-		}
-		case RPC_UNKNOWN:
-			EXPECT_EQ(1, homa_metrics_per_cpu()->server_rpcs_unknown);
-			break;
-		case BUSY:
-			EXPECT_EQ(RPC_INCOMING, rpc->state);
-			EXPECT_EQ(0, rpc->silent_ticks);
-			break;
-		case CUTOFFS:
-			EXPECT_EQ(900, route->peer->unsched_cutoffs[1]);
-			EXPECT_EQ(100, route->peer->unsched_cutoffs[7]);
-			EXPECT_EQ(htons(7), route->peer->cutoff_version);
-			break;
-		case FREEZE:
-			EXPECT_EQ(1, atomic_read(&tt_frozen));
-			tt_unfreeze();
-			tt_destroy();
-			break;
-		case START_MSG:
-			rpc = homa_rpc_find_server(&self->hsk, &self->client, id ^ 1);
-			ASSERT_NE(NULL, rpc);
-			EXPECT_EQ(40000, rpc->dport);
-			EXPECT_EQ(RPC_INCOMING, rpc->state);
-			EXPECT_EQ(64, rpc->msgin.length);
-			EXPECT_EQ(64, rpc->msgin.bytes_remaining);
-			EXPECT_TRUE(test_bit(RPC_GOT_START_MSG, &rpc->flags));
-			homa_rpc_unlock(rpc);
-			break;
-		}
-		if (type == ACK || type == RPC_UNKNOWN) {
-			struct homa_rpc *found;
-
-			EXPECT_EQ(active - 1,
-				  unit_list_length(&self->hsk.active_rpcs));
-			found = homa_rpc_find_server(&self->hsk, &self->client, id ^ 1);
-			EXPECT_EQ(NULL, found);
-			if (found)
-				homa_rpc_unlock(found);
-		} else {
-			EXPECT_EQ(active + (type == START_MSG),
-				  unit_list_length(&self->hsk.active_rpcs));
-		}
-		kfree_skb(skb);
-		EXPECT_EQ(count, mock_skb_count());
-	}
-	homa_route_release(route);
-}
-
-TEST_F(homa_udp_tunnel, receive_all_control_types_ipv4)
-{
-	receive_control_types(_metadata, self, AF_INET);
-}
-
-TEST_F(homa_udp_tunnel, receive_all_control_types_ipv6)
-{
-	receive_control_types(_metadata, self, AF_INET6);
-}
-#endif /* See strip.py */
-
-TEST_F(homa_udp_tunnel, valid_nonlinear_header_is_pulled)
-{
-	struct socket *socket = rcu_access_pointer(self->hnet->udp4);
-	struct sk_buff *skb = unit_udp_skb(&self->client, &self->server,
-					  &self->data.common, 64);
-	struct page *page = alloc_page(GFP_KERNEL);
-	int nonlinear = skb->len - 4;
-
-	memcpy(page_address(page), skb->data + 4, nonlinear);
-	skb_fill_page_desc(skb, 0, page, 0, nonlinear);
-	skb->data_len = nonlinear;
-	skb->tail -= nonlinear;
-	EXPECT_EQ(0, homa_udp_encap_rcv(socket->sk, skb));
-	EXPECT_EQ(1, unit_list_length(&self->hsk.active_rpcs));
-}
-
-TEST_F(homa_udp_tunnel, null_userdata_consumes_without_dispatch)
-{
-	struct socket *socket = rcu_access_pointer(self->hnet->udp4);
-	struct sk_buff *skb = unit_udp_skb(&self->client, &self->server,
-					  &self->data.common, 64);
-	int count = mock_skb_count();
-
-	rcu_assign_sk_user_data(socket->sk, NULL);
-	EXPECT_EQ(0, homa_udp_encap_rcv(socket->sk, skb));
-	EXPECT_EQ(count - 1, mock_skb_count());
-	EXPECT_EQ(SKB_DROP_REASON_NO_SOCKET, mock_drop_reasons[0]);
-	IF_NO_STRIP(EXPECT_EQ(0, homa_metrics_per_cpu()->softirq_calls));
-}
-
-#ifndef __STRIP__ /* See strip.py */
-/**
- * gro_child() - Create a UDP-encapsulated Homa DATA packet in the layout
- * that a packet has on the frag_list of a Homa GRO batch (or when the tunnel
- * GRO callback bypasses it): skb->data at the IP header, transport header at
- * the UDP header.
- * @self:    Test fixture.
- * @offset:  Message offset to put in the packet.
- * Return:   The new packet carrying 64 bytes of data.
- */
-static struct sk_buff *gro_child(FIXTURE_DATA(homa_udp_tunnel) *self,
-				 int offset)
-{
-	struct sk_buff *skb;
-
-	self->data.offset = htonl(offset);
-	skb = unit_udp_skb(&self->client, &self->server, &self->data.common, 64);
-	skb_push(skb, mock_ipv6 ? sizeof(struct ipv6hdr) : sizeof(struct iphdr));
-	return skb;
-}
-
-TEST_F(homa_udp_tunnel, gro_aggregate_dispatches_head_and_children)
-{
-	struct socket *socket = rcu_access_pointer(self->hnet->udp4);
-	int count = mock_skb_count();
-	struct sk_buff *head, *child1, *child2;
-	struct homa_rpc *rpc;
-
-	self->data.msg_length = htonl(192);
-	self->data.offset = htonl(0);
-	head = unit_udp_skb(&self->client, &self->server, &self->data.common, 64);
-	child1 = gro_child(self, 64);
-	child2 = gro_child(self, 128);
-
-	/* Children are linked on the frag_list but are not accounted for in
-	 * the head, as in the GRO contract.
-	 */
-	skb_shinfo(head)->frag_list = child1;
-	child1->next = child2;
-	ASSERT_EQ(sizeof(struct udphdr) + sizeof(self->data) + 64, head->len);
-	ASSERT_EQ(0, head->data_len);
-	ASSERT_EQ(head->len, ntohs(udp_hdr(head)->len));
-	ASSERT_EQ(child1->len - skb_transport_offset(child1),
-		  ntohs(udp_hdr(child1)->len));
-
-	EXPECT_EQ(0, homa_udp_encap_rcv(socket->sk, head));
-	EXPECT_EQ(0, unit_count_drops());
-	EXPECT_EQ(1, homa_metrics_per_cpu()->softirq_calls);
-	EXPECT_EQ(3, homa_metrics_per_cpu()->packets_received[DATA - DATA]);
-	EXPECT_EQ(1, unit_list_length(&self->hsk.active_rpcs));
-	EXPECT_EQ(count + 3, mock_skb_count());
-	rpc = homa_rpc_find_server(&self->hsk, &self->client, 101);
-	ASSERT_NE(NULL, rpc);
-	EXPECT_EQ(192, rpc->msgin.length);
-	EXPECT_EQ(0, rpc->msgin.bytes_remaining);
-	EXPECT_EQ(3, skb_queue_len(&rpc->msgin.packets));
-	homa_rpc_unlock(rpc);
-
-	/* Every packet now starts at its Homa header, and the head's frag
-	 * list was detached without touching its accounting.
-	 */
-	EXPECT_EQ(NULL, skb_shinfo(head)->frag_list);
-	EXPECT_EQ(sizeof(self->data) + 64, head->len);
-	EXPECT_EQ(sizeof(self->data) + 64, child1->len);
-	EXPECT_EQ(sizeof(self->data) + 64, child2->len);
-	EXPECT_EQ((void *)head->data, (void *)homa_header(head));
-	EXPECT_EQ((void *)child1->data, (void *)homa_header(child1));
-	EXPECT_EQ((void *)child2->data, (void *)homa_header(child2));
-}
-
-TEST_F(homa_udp_tunnel, bypassed_packet_with_ip_header_present)
-{
-	struct socket *socket = rcu_access_pointer(self->hnet->udp4);
-	struct sk_buff *skb = gro_child(self, 0);
-	int count = mock_skb_count();
-
-	EXPECT_EQ(0, homa_udp_encap_rcv(socket->sk, skb));
-	EXPECT_EQ(0, unit_count_drops());
-	EXPECT_EQ(1, unit_list_length(&self->hsk.active_rpcs));
-	EXPECT_EQ(count, mock_skb_count());
-	EXPECT_EQ((void *)skb->data, (void *)homa_header(skb));
-	EXPECT_EQ(sizeof(self->data) + 64, skb->len);
-}
-#endif /* See strip.py */
-
-/**
- * tx_skb() - Create an outgoing Homa packet with the headroom and layout
- * that the real packet builders produce (skb->data at the Homa header).
- * @header:  Homa header (of the full size for its type) to copy.
- * @payload: Number of data bytes to add after the header.
- * Return:   The new packet, padded to the minimum Homa packet length.
- */
-static struct sk_buff *tx_skb(struct homa_common_hdr *header, int payload)
-{
-	int header_length = sizeof(struct homa_data_hdr);
-	int length;
-	struct sk_buff *skb;
-
-#ifndef __STRIP__ /* See strip.py */
-	if (header->type != DATA)
-		header_length = control_header_lengths[header->type - GRANT];
-#endif /* See strip.py */
-	length = max_t(int, header_length + payload, HOMA_MIN_PKT_LENGTH);
-	skb = __homa_skb_alloc(length);
-
-	memcpy(skb_put(skb, header_length), header, header_length);
-	memset(skb_put(skb, length - header_length), 0, length - header_length);
-	if (header->type == DATA) {
-		memset(homa_get_skb_info(skb), 0, sizeof(struct homa_skb_info));
-		homa_get_skb_info(skb)->data_bytes = payload;
-	}
-	return skb;
-}
-
-TEST_F(homa_udp_tunnel, transmit_both_families_owns_skb_not_route)
+TEST_F(homa_udp_tunnel, homa_udp_xmit__basics)
 {
 	int i;
 
@@ -529,177 +154,135 @@ TEST_F(homa_udp_tunnel, transmit_both_families_owns_skb_not_route)
 		route = homa_route_get(&self->hsk, &self->client);
 		ASSERT_FALSE(IS_ERR(route));
 		refs = refcount_read(&route->refs);
-		skb = tx_skb(&self->data.common, 64);
-		IF_NO_STRIP(self->homa.priority_map[3] = 6);
-		homa_route_xmit(skb, &self->hsk, route, 3);
+		skb = tx_skb(&self->data, 64);
+		homa_udp_xmit(skb, &self->hsk, route, 6 << 5);
 		EXPECT_EQ(count, mock_skb_count());
 		EXPECT_EQ(refs, refcount_read(&route->refs));
 		EXPECT_EQ(i ? AF_INET6 : AF_INET, mock_udp_last_family);
-#ifndef __STRIP__ /* See strip.py */
 		EXPECT_EQ(6 << 5, mock_udp_last_tos);
-#else /* See strip.py */
-		EXPECT_EQ(0, mock_udp_last_tos);
-#endif /* See strip.py */
 		EXPECT_EQ(htons(HOMA_UDP_PORT), mock_udp_last_header.source);
 		EXPECT_EQ(htons(HOMA_UDP_PORT), mock_udp_last_header.dest);
 		EXPECT_NE(0, mock_udp_last_header.check);
-		EXPECT_EQ(CHECKSUM_PARTIAL, mock_udp_last_ip_summed);
-		EXPECT_EQ(64, mock_udp_last_data_bytes);
+		EXPECT_EQ(CHECKSUM_NONE, mock_udp_last_ip_summed);
 		EXPECT_EQ(offsetof(struct udphdr, check),
 			  mock_udp_last_csum_offset);
 		homa_route_release(route);
 	}
 	EXPECT_EQ(2, mock_udp_xmit_calls);
 }
-
-TEST_F(homa_udp_tunnel, unsendable_control_rejected_before_handoff)
-{
-	struct homa_busy_hdr busy = {.common = {.type = BUSY}};
-	int i;
-
-	for (i = 0; i < 2; i++) {
-		unsigned int overhead = sizeof(struct udphdr) +
-				(i ? sizeof(struct ipv6hdr) : sizeof(struct iphdr));
-		struct homa_route *route;
-		int calls, count;
-
-		mock_ipv6 = i;
-		self->hsk.sock.sk_family = i ? AF_INET6 : AF_INET;
-		self->client = unit_get_in_addr(i ? "2001:db8::1" : "1.2.3.4");
-		route = homa_route_get(&self->hsk, &self->client);
-		ASSERT_FALSE(IS_ERR(route));
-		calls = mock_udp_xmit_calls;
-		count = mock_skb_count();
-
-		/* A padded control packet cannot be shrunk to fit; it is
-		 * rejected before the consuming tunnel helper is invoked.
-		 */
-		mock_mtu = overhead + HOMA_MIN_PKT_LENGTH - 1;
-		EXPECT_EQ(-EMSGSIZE, __homa_xmit_control(&busy, sizeof(busy),
-							 route, &self->hsk));
-		EXPECT_EQ(calls, mock_udp_xmit_calls);
-		EXPECT_EQ(count, mock_skb_count());
-
-		mock_mtu++;
-		EXPECT_EQ(0, __homa_xmit_control(&busy, sizeof(busy), route,
-						 &self->hsk));
-		EXPECT_EQ(calls + 1, mock_udp_xmit_calls);
-		EXPECT_EQ(count, mock_skb_count());
-		homa_route_release(route);
-	}
-}
-
 #ifndef __STRIP__ /* See strip.py */
-TEST_F(homa_udp_tunnel, all_control_types_transmit_without_rpc)
-{
-	unsigned char storage[HOMA_MAX_HEADER] = {};
-	struct homa_common_hdr *header = (struct homa_common_hdr *)storage;
-	int i, type;
-
-	header->sport = htons(99);
-	header->dport = htons(40000);
-	header->sender_id = cpu_to_be64(100);
-	for (i = 0; i < 2; i++) {
-		struct homa_route *route;
-		int calls = mock_udp_xmit_calls, refs;
-
-		mock_ipv6 = i;
-		self->hsk.sock.sk_family = i ? AF_INET6 : AF_INET;
-		self->client = unit_get_in_addr(i ? "2001:db8::1" : "1.2.3.4");
-		self->server = unit_get_in_addr(i ? "2001:db8::2" : "5.6.7.8");
-		route = homa_route_get(&self->hsk, &self->client);
-		ASSERT_FALSE(IS_ERR(route));
-		refs = refcount_read(&route->refs);
-		for (type = DATA + 1; type <= MAX_OP; type++) {
-			int header_length = control_header_lengths[type - GRANT];
-			int length = max_t(int, header_length, HOMA_MIN_PKT_LENGTH);
-			int count = mock_skb_count();
-			struct homa_common_hdr *inner;
-			struct sk_buff *skb;
-
-			header->type = type;
-			skb = tx_skb(header, length - header_length);
-			skb_get(skb);
-			homa_route_xmit(skb, &self->hsk, route, 0);
-			EXPECT_EQ(calls + type - DATA, mock_udp_xmit_calls);
-			EXPECT_EQ(i ? AF_INET6 : AF_INET, mock_udp_last_family);
-			EXPECT_EQ(htons(HOMA_UDP_PORT), mock_udp_last_header.source);
-			EXPECT_EQ(htons(HOMA_UDP_PORT), mock_udp_last_header.dest);
-			EXPECT_NE(0, mock_udp_last_header.check);
-			EXPECT_EQ(CHECKSUM_PARTIAL, mock_udp_last_ip_summed);
-			EXPECT_EQ(offsetof(struct udphdr, check),
-				  mock_udp_last_csum_offset);
-			EXPECT_EQ(sizeof(struct udphdr) + length,
-				  ntohs(mock_udp_last_header.len));
-			EXPECT_EQ((i ? sizeof(struct ipv6hdr) :
-				       sizeof(struct iphdr)) +
-				  sizeof(struct udphdr) + length, skb->len);
-			EXPECT_EQ(i ? sizeof(struct ipv6hdr) : sizeof(struct iphdr),
-				  skb_transport_header(skb) - skb_network_header(skb));
-			EXPECT_EQ(i, skb_is_ipv6(skb));
-			EXPECT_EQ(IPPROTO_UDP, i ? ipv6_hdr(skb)->nexthdr :
-						  ip_hdr(skb)->protocol);
-			inner = (struct homa_common_hdr *)(skb_transport_header(skb) +
-							  sizeof(struct udphdr));
-			EXPECT_EQ(type, inner->type);
-			EXPECT_EQ(htons(99), inner->sport);
-			EXPECT_EQ(htons(40000), inner->dport);
-			EXPECT_EQ(cpu_to_be64(100), inner->sender_id);
-			EXPECT_EQ(0, memcmp(header, inner, header_length));
-			EXPECT_EQ(refs, refcount_read(&route->refs));
-			EXPECT_EQ(1, refcount_read(&skb->users));
-			EXPECT_EQ(count + 1, mock_skb_count());
-			kfree_skb(skb);
-			EXPECT_EQ(count, mock_skb_count());
-			EXPECT_EQ(0, unit_list_length(&self->hsk.active_rpcs));
-		}
-		EXPECT_EQ(calls + MAX_OP - DATA, mock_udp_xmit_calls);
-		EXPECT_EQ(0, unit_list_length(&self->hsk.active_rpcs));
-		homa_route_release(route);
-	}
-}
-
-TEST_F(homa_udp_tunnel, software_gso_keeps_udp_l4_and_forces_checksum_none)
+TEST_F(homa_udp_tunnel, homa_udp_xmit__gso)
 {
 	struct homa_route *route = homa_route_get(&self->hsk, &self->client);
-	struct sk_buff *skb = tx_skb(&self->data.common,
-				     sizeof(self->data) + 64);
-	struct homa_data_hdr *second;
+	struct sk_buff *skb;
 
 	ASSERT_FALSE(IS_ERR(route));
+	skb = tx_skb(&self->data, sizeof(self->data) + 64);
 	skb_shinfo(skb)->gso_type = SKB_GSO_UDP_L4;
 	skb_shinfo(skb)->gso_size = sizeof(self->data) + 32;
 	skb_shinfo(skb)->gso_segs = 2;
-	second = (struct homa_data_hdr *)(skb->data + sizeof(self->data) + 32);
-	*second = self->data;
-	second->offset = htonl(32);
-	homa_get_skb_info(skb)->data_bytes = 64;
+	homa_udp_xmit(skb, &self->hsk, route, 0);
+	EXPECT_EQ(CHECKSUM_PARTIAL, mock_udp_last_ip_summed);
+
+	skb = tx_skb(&self->data, sizeof(self->data) + 64);
+	skb_shinfo(skb)->gso_type = SKB_GSO_UDP_L4;
+	skb_shinfo(skb)->gso_size = sizeof(self->data) + 32;
+	skb_shinfo(skb)->gso_segs = 2;
 	self->homa.gso_force_software = 1;
-	homa_route_xmit(skb, &self->hsk, route, 0);
+	homa_udp_xmit(skb, &self->hsk, route, 0);
 	EXPECT_EQ(CHECKSUM_NONE, mock_udp_last_ip_summed);
-	EXPECT_EQ(SKB_GSO_UDP_L4, mock_udp_last_gso_type);
-	EXPECT_EQ(sizeof(self->data) + 32, mock_udp_last_gso_size);
-	EXPECT_EQ(2, mock_udp_last_gso_segs);
-	EXPECT_EQ(offsetof(struct udphdr, check), mock_udp_last_csum_offset);
 	homa_route_release(route);
 }
 #endif /* See strip.py */
 
-TEST_F(homa_udp_tunnel, net_destroy_releases_pair_once_after_sockets)
+TEST_F(homa_udp_tunnel, homa_udp_encap_rcv__basics)
 {
-	int releases = mock_udp_release_calls;
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb;
 
-	EXPECT_NE(NULL, rcu_access_pointer(self->hnet->udp4));
-	EXPECT_NE(NULL, rcu_access_pointer(self->hnet->udp6));
-	homa_net_destroy(self->hnet);
-	EXPECT_EQ(releases + 2, mock_udp_release_calls);
-	EXPECT_EQ(NULL, rcu_access_pointer(self->hnet->udp4));
-	EXPECT_EQ(NULL, rcu_access_pointer(self->hnet->udp6));
-	EXPECT_TRUE(self->hsk.shutdown);
+	skb = unit_udp_skb(&self->client, &self->server, &self->data.common,
+			   64);
 
-	/* A repeated release finds nothing left to do. */
-	homa_udp_destroy(self->hnet);
-	EXPECT_EQ(releases + 2, mock_udp_release_calls);
+	/* Keep a reference so the packet can be examined afterwards. */
+	skb_get(skb);
+	EXPECT_EQ(0, homa_udp_encap_rcv(sk, skb));
+	EXPECT_EQ(1, unit_list_length(&self->hsk.active_rpcs));
+	EXPECT_EQ((void *)skb->data, (void *)homa_header(skb));
+	EXPECT_EQ(sizeof(self->data) + 64, skb->len);
+	EXPECT_EQ(0, memcmp(&self->data, skb->data, sizeof(self->data)));
+	kfree_skb(skb);
+}
+TEST_F(homa_udp_tunnel, homa_udp_encap_rcv__no_namespace)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb;
+	int count;
+
+	skb = unit_udp_skb(&self->client, &self->server, &self->data.common,
+			   64);
+	count = mock_skb_count();
+	rcu_assign_sk_user_data(sk, NULL);
+	EXPECT_EQ(0, homa_udp_encap_rcv(sk, skb));
+	EXPECT_EQ(count - 1, mock_skb_count());
+	EXPECT_EQ(SKB_DROP_REASON_NO_SOCKET, mock_drop_reasons[0]);
+	EXPECT_EQ(0, unit_list_length(&self->hsk.active_rpcs));
+}
+TEST_F(homa_udp_tunnel, homa_udp_encap_rcv__nonlinear_header)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb = unit_udp_skb(&self->client, &self->server,
+					  &self->data.common, 64);
+	struct page *page = alloc_page(GFP_KERNEL);
+	int nonlinear = skb->len - 4;
+
+	memcpy(page_address(page), skb->data + 4, nonlinear);
+	skb_fill_page_desc(skb, 0, page, 0, nonlinear);
+	skb->data_len = nonlinear;
+	skb->tail -= nonlinear;
+	EXPECT_EQ(0, homa_udp_encap_rcv(sk, skb));
+	EXPECT_EQ(1, unit_list_length(&self->hsk.active_rpcs));
+}
+TEST_F(homa_udp_tunnel, homa_udp_encap_rcv__data_at_ip_header)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb;
+
+	skb = unit_gro_skb(&self->client, &self->server, &self->data.common,
+			   64);
+	skb_get(skb);
+	EXPECT_EQ(0, homa_udp_encap_rcv(sk, skb));
+	EXPECT_EQ(1, unit_list_length(&self->hsk.active_rpcs));
+	EXPECT_EQ((void *)skb->data, (void *)homa_header(skb));
+	EXPECT_EQ(sizeof(self->data) + 64, skb->len);
+	kfree_skb(skb);
+}
+TEST_F(homa_udp_tunnel, homa_udp_encap_rcv__frag_list)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *head, *child1, *child2;
+
+	self->data.msg_length = htonl(192);
+	head = unit_udp_skb(&self->client, &self->server, &self->data.common,
+			    64);
+	self->data.offset = htonl(64);
+	child1 = unit_gro_skb(&self->client, &self->server,
+			      &self->data.common, 64);
+	self->data.offset = htonl(128);
+	child2 = unit_gro_skb(&self->client, &self->server,
+			      &self->data.common, 64);
+	skb_shinfo(head)->frag_list = child1;
+	child1->next = child2;
+	skb_get(child1);
+	skb_get(child2);
+
+	EXPECT_EQ(0, homa_udp_encap_rcv(sk, head));
+	EXPECT_EQ(0, unit_count_drops());
+	EXPECT_EQ((void *)child1->data, (void *)homa_header(child1));
+	EXPECT_EQ((void *)child2->data, (void *)homa_header(child2));
+	EXPECT_EQ(sizeof(self->data) + 64, child1->len);
+	EXPECT_EQ(sizeof(self->data) + 64, child2->len);
+	kfree_skb(child1);
+	kfree_skb(child2);
 }
 
 /**
@@ -805,7 +388,7 @@ static struct sock *tunnel_sock(struct homa_net *hnet, bool ipv6)
 		       rcu_access_pointer(hnet->udp4))->sk;
 }
 
-TEST_F(homa_udp_tunnel, errors_ignore_pmtu)
+TEST_F(homa_udp_tunnel, homa_udp_encap_err_rcv__path_mtu_ignored)
 {
 	int i;
 
@@ -830,7 +413,7 @@ TEST_F(homa_udp_tunnel, errors_ignore_pmtu)
 	}
 }
 
-TEST_F(homa_udp_tunnel, errors_zero_err_ignored)
+TEST_F(homa_udp_tunnel, homa_udp_encap_err_rcv__zero_err_ignored)
 {
 	struct homa_rpc *rpc;
 	struct sk_buff *quote;
@@ -846,7 +429,7 @@ TEST_F(homa_udp_tunnel, errors_zero_err_ignored)
 	kfree_skb(quote);
 }
 
-TEST_F(homa_udp_tunnel, errors_host_unreachable)
+TEST_F(homa_udp_tunnel, homa_udp_encap_err_rcv__host_unreachable)
 {
 	int i;
 
@@ -869,7 +452,7 @@ TEST_F(homa_udp_tunnel, errors_host_unreachable)
 	}
 }
 
-TEST_F(homa_udp_tunnel, errors_protocol_not_supported)
+TEST_F(homa_udp_tunnel, homa_udp_encap_err_rcv__protocol_not_supported)
 {
 	int i;
 
@@ -892,7 +475,7 @@ TEST_F(homa_udp_tunnel, errors_protocol_not_supported)
 	}
 }
 
-TEST_F(homa_udp_tunnel, errors_port_unreachable_scoped_to_homa_port)
+TEST_F(homa_udp_tunnel, homa_udp_encap_err_rcv__port_unreachable)
 {
 	int i;
 
@@ -929,7 +512,7 @@ TEST_F(homa_udp_tunnel, errors_port_unreachable_scoped_to_homa_port)
 	}
 }
 
-TEST_F(homa_udp_tunnel, errors_other_icmp_types_use_baseline_filter)
+TEST_F(homa_udp_tunnel, homa_udp_encap_err_rcv__other_icmp_type_ignored)
 {
 	int i;
 
@@ -957,7 +540,7 @@ TEST_F(homa_udp_tunnel, errors_other_icmp_types_use_baseline_filter)
 	}
 }
 
-TEST_F(homa_udp_tunnel, errors_without_namespace_ignored)
+TEST_F(homa_udp_tunnel, homa_udp_encap_err_rcv__no_namespace)
 {
 	int i;
 
@@ -985,3 +568,80 @@ TEST_F(homa_udp_tunnel, errors_without_namespace_ignored)
 		kfree_skb(quote);
 	}
 }
+
+#ifndef __STRIP__ /* See strip.py */
+TEST_F(homa_udp_tunnel, homa_udp_gro_receive__basics)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb;
+	LIST_HEAD(held_list);
+
+	skb = unit_gro_skb(&self->client, &self->server, &self->data.common,
+			   64);
+	self->homa.gro_policy = 0;
+	cur_offload_core->held_skb = NULL;
+	EXPECT_EQ(NULL, homa_udp_gro_receive(sk, &held_list, skb));
+	EXPECT_FALSE(NAPI_GRO_CB(skb)->flush);
+	EXPECT_EQ(skb, cur_offload_core->held_skb);
+	cur_offload_core->held_skb = NULL;
+	kfree_skb(skb);
+}
+TEST_F(homa_udp_tunnel, homa_udp_gro_receive__no_namespace)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb;
+	LIST_HEAD(held_list);
+
+	skb = unit_gro_skb(&self->client, &self->server, &self->data.common,
+			   64);
+	cur_offload_core->held_skb = NULL;
+	rcu_assign_sk_user_data(sk, NULL);
+	EXPECT_EQ(NULL, homa_udp_gro_receive(sk, &held_list, skb));
+	EXPECT_TRUE(NAPI_GRO_CB(skb)->flush);
+	EXPECT_EQ(NULL, cur_offload_core->held_skb);
+	rcu_assign_sk_user_data(sk, self->hnet);
+	kfree_skb(skb);
+}
+TEST_F(homa_udp_tunnel, homa_udp_gro_receive__flush_already_set)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb;
+	LIST_HEAD(held_list);
+
+	skb = unit_gro_skb(&self->client, &self->server, &self->data.common,
+			   64);
+	NAPI_GRO_CB(skb)->flush = 1;
+	cur_offload_core->held_skb = NULL;
+	EXPECT_EQ(NULL, homa_udp_gro_receive(sk, &held_list, skb));
+	EXPECT_EQ(NULL, cur_offload_core->held_skb);
+	kfree_skb(skb);
+}
+TEST_F(homa_udp_tunnel, homa_udp_gro_receive__no_udp_checksum)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb;
+	LIST_HEAD(held_list);
+
+	skb = unit_gro_skb(&self->client, &self->server, &self->data.common,
+			   64);
+	udp_hdr(skb)->check = 0;
+	cur_offload_core->held_skb = NULL;
+	EXPECT_EQ(NULL, homa_udp_gro_receive(sk, &held_list, skb));
+	EXPECT_TRUE(NAPI_GRO_CB(skb)->flush);
+	EXPECT_EQ(NULL, cur_offload_core->held_skb);
+	kfree_skb(skb);
+}
+
+TEST_F(homa_udp_tunnel, homa_udp_gro_complete__basics)
+{
+	struct sock *sk = rcu_access_pointer(self->hnet->udp4)->sk;
+	struct sk_buff *skb;
+
+	skb = unit_gro_skb(&self->client, &self->server, &self->data.common,
+			   64);
+	skb_shinfo(skb)->gso_type = SKB_GSO_UDP_TUNNEL_CSUM;
+	EXPECT_EQ(0, homa_udp_gro_complete(sk, skb, 0));
+	EXPECT_EQ(0, skb_shinfo(skb)->gso_type);
+	kfree_skb(skb);
+}
+#endif /* See strip.py */

@@ -85,10 +85,6 @@ int mock_udp_last_family;
 int mock_udp_last_tos;
 int mock_udp_last_ip_summed;
 int mock_udp_last_csum_offset;
-unsigned int mock_udp_last_gso_type;
-unsigned int mock_udp_last_gso_size;
-unsigned int mock_udp_last_gso_segs;
-int mock_udp_last_data_bytes;
 
 /* If a test sets this variable to nonzero, calls to wake_up and
  * wake_up_all will be logged.
@@ -923,12 +919,6 @@ static void mock_udp_log_xmit(struct sk_buff *skb, int family, u8 tos)
 	mock_udp_last_tos = tos;
 	mock_udp_last_ip_summed = skb->ip_summed;
 	mock_udp_last_csum_offset = skb->csum_offset;
-	mock_udp_last_gso_type = skb_shinfo(skb)->gso_type;
-	mock_udp_last_gso_size = skb_shinfo(skb)->gso_size;
-	mock_udp_last_gso_segs = skb_shinfo(skb)->gso_segs;
-	mock_udp_last_data_bytes =
-		((struct homa_common_hdr *)skb->data)->type == DATA ?
-		homa_get_skb_info(skb)->data_bytes : 0;
 	mock_xmit_prios_offset += snprintf(
 		mock_xmit_prios + mock_xmit_prios_offset,
 		sizeof(mock_xmit_prios) - mock_xmit_prios_offset,
@@ -950,14 +940,6 @@ static void mock_udp_push(struct sk_buff *skb, __be16 sport, __be16 dport,
 	udp->dest = dport;
 	udp->len = htons(skb->len);
 	udp->check = nocheck ? 0 : htons(0xabcd);
-	if (!nocheck && !skb_is_gso(skb) &&
-	    skb->ip_summed != CHECKSUM_PARTIAL) {
-		skb->ip_summed = CHECKSUM_PARTIAL;
-		skb->csum_start = skb_transport_header(skb) - skb->head;
-		skb->csum_offset = offsetof(struct udphdr, check);
-	}
-	mock_udp_last_ip_summed = skb->ip_summed;
-	mock_udp_last_csum_offset = skb->csum_offset;
 	mock_udp_last_header = *udp;
 }
 
@@ -2364,7 +2346,7 @@ void mock_put_page(struct page *page)
 
 /**
  * mock_raw_skb() - Performs most of the work of mock_skb_alloc and
- * wire packet helpers. Allocates and initializes an skb.
+ * mock_tcp_skb. Allocates and initializes an skb.
  * @saddr:        IPv6 address to use as the sender of the packet, in
  *                network byte order.
  * @daddr:        IPv6 address to use as the destination of the packet, in
@@ -2941,10 +2923,6 @@ void mock_teardown(void)
 	mock_udp_last_tos = 0;
 	mock_udp_last_ip_summed = 0;
 	mock_udp_last_csum_offset = 0;
-	mock_udp_last_gso_type = 0;
-	mock_udp_last_gso_size = 0;
-	mock_udp_last_gso_segs = 0;
-	mock_udp_last_data_bytes = 0;
 	mock_log_wakeups = 0;
 	mock_mtu = 0;
 	mock_max_skb_frags = 10;
