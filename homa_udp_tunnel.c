@@ -205,7 +205,8 @@ int homa_udp_encap_rcv(struct sock *sk, struct sk_buff *skb)
  * message arrives for a Homa packet; aborts the RPCs affected by the error.
  * @sk:      Homa's UDP tunnel socket for the namespace.
  * @skb:     The ICMP message; skb->data refers to the IP header of the
- *           original packet. Not consumed.
+ *           original packet (the start of the packet that caused the
+ *           error, which the ICMP message carries). Not consumed.
  * @err:     Positive errno derived from the ICMP type and code.
  * @port:    UDP destination port of the original packet.
  * @info:    ICMP information field.
