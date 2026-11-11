@@ -30,7 +30,7 @@ struct homa_message_out {
 	/**
 	 * @frags: Array of fragments that hold the tx message in a ready-
 	 * to-transmit form, consisting of segments, each with a
-	 * homa_seg_hdr followed by the data for that segment. These
+	 * homa_data_hdr followed by the data for that segment. These
 	 * fragments will be incorporated into skb's to transmit the message.
 	 * If this doesn't point to @frag below then it is dynamically
 	 * allocated and must be freed.
@@ -80,8 +80,8 @@ struct homa_message_out {
 
 	/**
 	 * @next_xmit_offset: All bytes in the message, up to but not
-	 * including this one, have been passed to ip_queue_xmit or
-	 * ip6_xmit at least once.
+	 * including this one, have been passed to homa_route_xmit at least
+	 * once.
 	 */
 	int next_xmit_offset;
 
@@ -513,7 +513,8 @@ void     homa_rpc_end(struct homa_rpc *rpc);
 struct homa_rpc
 	*homa_rpc_find_client(struct homa_sock *hsk, u64 id);
 struct homa_rpc
-	*homa_rpc_find_from_skb(struct sk_buff *skb, bool incoming);
+	*homa_rpc_find_from_skb(struct sk_buff *skb,
+				struct homa_common_hdr *h, bool incoming);
 struct homa_rpc
 	*homa_rpc_find_server(struct homa_sock *hsk,
 			      const struct in6_addr *saddr, u64 id);

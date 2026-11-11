@@ -539,14 +539,14 @@ struct homa_metrics {
 	u64 peer_dst_refreshes;
 
 	/**
-	 * @control_xmit_errors: total number of times ip_queue_xmit
-	 * failed when transmitting a control packet.
+	 * @control_xmit_errors: total number of control packets that
+	 * couldn't be sent because they didn't fit in the route's MTU.
 	 */
 	u64 control_xmit_errors;
 
 	/**
-	 * @data_xmit_errors: total number of times ip_queue_xmit
-	 * failed when transmitting a data packet.
+	 * @data_xmit_errors: total number of data packets that couldn't be
+	 * sent because they didn't fit in the route's MTU.
 	 */
 	u64 data_xmit_errors;
 
@@ -787,15 +787,15 @@ struct homa_metrics {
 
 	/**
 	 * @gro_grant_bypasses: total number of GRANT packets passed directly
-	 * to homa_softirq by homa_gro_receive, bypassing the normal SoftIRQ
-	 * mechanism (triggered by HOMA_GRO_FAST_GRANTS).
+	 * to homa_softirq during GRO, bypassing the normal SoftIRQ mechanism
+	 * (triggered by HOMA_GRO_FAST_GRANTS).
 	 */
 	u64 gro_grant_bypasses;
 
 	/**
 	 * @gro_data_bypasses: total number of DATA packets passed directly
-	 * to homa_softirq by homa_gro_receive, bypassing the normal SoftIRQ
-	 * mechanism (triggered by HOMA_GRO_SHORT_BYPASS).
+	 * to homa_softirq during GRO, bypassing the normal SoftIRQ mechanism
+	 * (triggered by HOMA_GRO_SHORT_BYPASS).
 	 */
 	u64 gro_data_bypasses;
 

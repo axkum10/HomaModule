@@ -346,13 +346,6 @@ struct homa {
 
 #ifndef __STRIP__ /* See strip.py */
 	/**
-	 * @hijack_tcp: Non-zero means encapsulate outgoing Homa packets
-	 * as TCP packets (i.e. use TCP as the IP protocol). This makes TSO
-	 * and RSS work better. Set externally via sysctl.
-	 */
-	int hijack_tcp;
-
-	/**
 	 * @max_gro_skbs: Maximum number of socket buffers that can be
 	 * aggregated by the GRO mechanism.  Set externally via sysctl.
 	 */
@@ -504,6 +497,16 @@ struct homa_net {
 	struct homa *homa;
 
 	/**
+	 * @udp4: Kernel UDP socket bound to HOMA_UDP_PORT, used to send and
+	 * receive all of the IPv4 Homa packets in this namespace (see
+	 * homa_udp_tunnel.c). Shared by all Homa sockets in the namespace.
+	 */
+	struct socket __rcu *udp4;
+
+	/** @udp6: Same as @udp4, except for IPv6. */
+	struct socket __rcu *udp6;
+
+	/**
 	 * @prev_default_port: The most recent port number assigned from
 	 * the range of default ports.
 	 */
@@ -545,21 +548,6 @@ struct homa_skb_info {
 static inline struct homa_skb_info *homa_get_skb_info(struct sk_buff *skb)
 {
 	return (struct homa_skb_info *)(skb_end_pointer(skb)) - 1;
-}
-
-/**
- * homa_set_doff() - Fills in the doff TCP header field for a packet.
- * @skb:   Packet whose doff field is to be set.
- * @size:  Size of the "header" in bytes (must be a multiple of 4). This is
- *         needed for two reasons. First, for TSO to work it must indicate
- *         the number of bytes that should be replicated in each segment.
- *         The bytes after this will be distributed among segments. Second,
- *         for TCP hijacking to work it must have a valid value (20 is a
- *         good choice if the packet isn't a TSO frame).
- */
-static inline void homa_set_doff(struct sk_buff *skb, int size)
-{
-	tcp_hdr(skb)->doff = size >> 2;
 }
 
 /** skb_is_ipv6() - Return true if the packet is encapsulated with IPv6,
@@ -620,23 +608,6 @@ static inline struct in6_addr skb_canonical_ipv6_saddr(struct sk_buff *skb)
 	return mapped;
 }
 
-/**
- * homa_make_header_avl() - Invokes pskb_may_pull to make sure that all the
- * Homa header information for a packet is in the linear part of the skb
- * where it can be addressed using skb_transport_header.
- * @skb:     Packet for which header is needed.
- * Return:   The result of pskb_may_pull (true for success)
- */
-static inline bool homa_make_header_avl(struct sk_buff *skb)
-{
-	int pull_length;
-
-	pull_length = skb_transport_header(skb) - skb->data + HOMA_MAX_HEADER;
-	if (pull_length > skb->len)
-		pull_length = skb->len;
-	return pskb_may_pull(skb, pull_length);
-}
-
 #ifndef __UPSTREAM__ /* See strip.py */
 #ifdef __UNIT_TEST__
 void unit_log_printf(const char *separator, const char *format, ...)
@@ -662,10 +633,6 @@ int      homa_copy_to_user(struct homa_rpc *rpc);
 void     homa_data_pkt(struct sk_buff *skb, struct homa_rpc *rpc);
 void     homa_destroy(struct homa *homa);
 void     homa_dispatch_pkts(struct sk_buff *skb);
-int      homa_err_handler_v4(struct sk_buff *skb, u32 info);
-int      homa_err_handler_v6(struct sk_buff *skb,
-			     struct inet6_skb_parm *opt, u8 type,  u8 code,
-			     int offset, __be32 info);
 struct homa_gap *homa_gap_alloc(struct list_head *next, int start, int end);
 int      homa_getsockopt(struct sock *sk, int level, int optname,
 			 char __user *optval, int __user *optlen);
@@ -959,11 +926,11 @@ static inline int homa_high_priority(struct homa *homa)
  * Locks and Packet Transmission:
  *
  * Homa must not hold locks while transmitting packets (e.g. by calling
- * ip_queue_xmit or ip6_xmit). This is because homa_qdisc could be invoked
+ * homa_route_xmit). This is because homa_qdisc could be invoked
  * during the transmission process, and it may need to acquire locks under
  * some conditions (such as an RPC lock). Homa_qdisc is invoked with the
- * qdisc lock held, so invoking ip*xmit with a lock held can result in
- * AB-BA deadlocks.
+ * qdisc lock held, so invoking homa_route_xmit with a lock held can result
+ * in AB-BA deadlocks.
  */
 
 #endif /* _HOMA_IMPL_H */

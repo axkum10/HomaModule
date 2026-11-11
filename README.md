@@ -96,6 +96,10 @@ This repo contains an implementation of the Homa transport protocol as a Linux k
      sysctl mechanism. For details, see the man page `homa.7`.
 
 ## Significant changes
+- November 2026: Homa packets are now carried in UDP datagrams (port 5001)
+  instead of using IP protocol 146 on the wire; applications still open
+  Homa sockets with IPPROTO_HOMA. TCP hijacking has been removed. Peers
+  must run the same version of Homa.
 - September 2026: Protocol change in granting mechanism. Messages that
   require grants are now completely scheduled (no initial unscheduled
   packets are sent). A new packet type, START_MSG, has been introduced

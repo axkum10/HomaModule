@@ -77,12 +77,13 @@
  */
 
 #include "homa_impl.h"
-#include "homa_hijack.h"
 #include "homa_qdisc.h"
 #include "homa_rpc.h"
+#include "homa_udp_tunnel.h"
 #include "timetrace.h"
 
 #include <linux/ethtool.h>
+#include <net/tcp.h>
 
 /* Used to enable sysctl access to configuration parameters related to
  * homa_qdisc. The @data fields are actually offsets within a struct
@@ -154,6 +155,7 @@ static struct Qdisc_ops homa_qdisc_ops __read_mostly = {
  */
 static inline bool is_homa_pkt(struct sk_buff *skb)
 {
+	struct udphdr _uh, *uh;
 	int eth_prot, protocol;
 
 	eth_prot = ntohs(skb_protocol(skb, true));
@@ -163,8 +165,14 @@ static inline bool is_homa_pkt(struct sk_buff *skb)
 		protocol = ipv6_hdr(skb)->nexthdr;
 	else
 		return false;
-	return protocol == IPPROTO_HOMA ||
-		(protocol == IPPROTO_TCP && homa_skb_hijacked(skb));
+	if (protocol != IPPROTO_UDP)
+		return false;
+
+	/* Only Homa uses HOMA_UDP_PORT as its local port. */
+	uh = skb_header_pointer(skb, skb_transport_offset(skb), sizeof(_uh),
+				&_uh);
+	return uh && uh->source == htons(HOMA_UDP_PORT) &&
+	       uh->dest == htons(HOMA_UDP_PORT);
 }
 
 /**
@@ -586,8 +594,7 @@ int homa_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	 * issue any grants, even though the "incoming" data isn't going to
 	 * be transmitted anytime soon.
 	 */
-	h = (struct homa_data_hdr *)skb_transport_header(skb);
-	offset = ntohl(h->seg.offset);
+	h = (struct homa_data_hdr *)homa_header(skb);
 	if (h->common.type != DATA ||
 	    ntohl(h->msg_length) < qshared->defer_min_bytes) {
 		homa_qdisc_update_link_idle(qdev, pkt_len, -1);
@@ -603,6 +610,7 @@ int homa_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	/* This packet needs to be deferred until the NIC queue has
 	 * been drained a bit.
 	 */
+	offset = ntohl(h->offset);
 	tt_record3("homa_qdisc_enqueue deferring homa data packet for id %d, offset %d on qid %d",
 		   be64_to_cpu(h->common.sender_id), offset, q->ix);
 	homa_qdisc_defer_homa(qdev, skb);
@@ -610,11 +618,11 @@ int homa_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 
 enqueue:
 	if (is_homa_pkt(skb)) {
-		h = (struct homa_data_hdr *)skb_transport_header(skb);
+		h = (struct homa_data_hdr *)homa_header(skb);
 		if (h->common.type == DATA) {
 			tt_record3("homa_qdisc_enqueue queuing homa data packet for id %d, offset %d on qid %d",
-				   be64_to_cpu(h->common.sender_id), offset,
-				   q->ix);
+				   be64_to_cpu(h->common.sender_id),
+				   ntohl(h->offset), q->ix);
 		}
 	} else {
 		tt_record1("homa_qdisc_enqueue queuing non-homa packet, qid %d",
@@ -737,7 +745,7 @@ void homa_qdisc_defer_homa(struct homa_qdisc_dev *qdev, struct sk_buff *skb)
 	/* Must hold the RPC lock while queuing the RPC in the qdisc, in
 	 * order to prevent concurrent deletion of the RPC.
 	 */
-	rpc = homa_rpc_find_from_skb(skb, false);
+	rpc = homa_rpc_find_from_skb(skb, homa_header(skb), false);
 	if (!rpc) {
 		/* RPC has ended; discard packet. */
 		kfree_skb_reason(skb, SKB_DROP_REASON_NO_SOCKET);
@@ -750,8 +758,8 @@ void homa_qdisc_defer_homa(struct homa_qdisc_dev *qdev, struct sk_buff *skb)
 		struct homa_data_hdr *h;
 		int bytes_left;
 
-		h = (struct homa_data_hdr *)skb_transport_header(skb);
-		bytes_left = rpc->msgout.length - ntohl(h->seg.offset);
+		h = (struct homa_data_hdr *)homa_header(skb);
+		bytes_left = rpc->msgout.length - ntohl(h->offset);
 		if (bytes_left < rpc->qrpc.tx_left)
 			rpc->qrpc.tx_left = bytes_left;
 		rpc->qrpc.qdev = qdev;
@@ -945,8 +953,8 @@ struct sk_buff *homa_qdisc_get_deferred_homa(struct homa_qdisc_dev *qdev)
 	 * it's position won't change because it is already highest priority).
 	 */
 	info = homa_get_skb_info(skb);
-	h = (struct homa_data_hdr *)skb_transport_header(skb);
-	bytes_left = rpc->msgout.length - (ntohl(h->seg.offset) +
+	h = (struct homa_data_hdr *)homa_header(skb);
+	bytes_left = rpc->msgout.length - (ntohl(h->offset) +
 					   info->data_bytes);
 	if (bytes_left < qrpc->tx_left)
 		qrpc->tx_left = bytes_left;
@@ -991,9 +999,9 @@ int homa_qdisc_xmit_deferred_homa(struct homa_qdisc_dev *qdev)
 
 	pkt_len = qdisc_pkt_len(skb);
 	homa_qdisc_update_link_idle(qdev, pkt_len, -1);
-	h = (struct homa_data_hdr *)skb_transport_header(skb);
+	h = (struct homa_data_hdr *)homa_header(skb);
 	tt_record2("homa_qdisc_pacer queuing homa data packet for id %d, offset %d",
-		   be64_to_cpu(h->common.sender_id), ntohl(h->seg.offset));
+		   be64_to_cpu(h->common.sender_id), ntohl(h->offset));
 
 	/* Run the packet through dev_queue_xmit again to transmit it;
 	 * this means it will pass through homa_disc_enqueue again, but

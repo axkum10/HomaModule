@@ -209,7 +209,7 @@ enum skb_drop_reason homa_add_packet(struct homa_rpc *rpc, struct sk_buff *skb)
 {
 	struct homa_data_hdr *h = (struct homa_data_hdr *)skb->data;
 	struct homa_gap *gap, *dummy, *gap2;
-	u32 start = ntohl(h->seg.offset);
+	u32 start = ntohl(h->offset);
 	u32 length = homa_data_len(skb);
 	enum skb_drop_reason reason = 0;
 	u32 end = start + length;
@@ -412,7 +412,7 @@ int homa_copy_to_user(struct homa_rpc *rpc)
 			struct homa_data_hdr *h = (struct homa_data_hdr *)
 					skbs[i]->data;
 			int pkt_length = homa_data_len(skbs[i]);
-			u32 offset = ntohl(h->seg.offset);
+			u32 offset = ntohl(h->offset);
 			int buf_bytes, chunk_size;
 			struct iov_iter iter;
 			int copied = 0;
@@ -728,7 +728,7 @@ void homa_data_pkt(struct sk_buff *skb, struct homa_rpc *rpc)
 
 	tt_record4("incoming data packet, id %d, peer 0x%x, offset %d/%d",
 		   homa_local_id(h->common.sender_id),
-		   tt_addr(rpc->route->peer->addr), ntohl(h->seg.offset),
+		   tt_addr(rpc->route->peer->addr), ntohl(h->offset),
 		   ntohl(h->msg_length));
 
 	if (rpc->state != RPC_INCOMING && homa_is_client(rpc->id)) {
@@ -761,11 +761,11 @@ void homa_data_pkt(struct sk_buff *skb, struct homa_rpc *rpc)
 		 */
 #ifndef __STRIP__ /* See strip.py */
 		tt_record4("Dropping packet because no buffer space available: id %d, offset %d, length %d, old incoming %d",
-			   rpc->id, ntohl(h->seg.offset), homa_data_len(skb),
+			   rpc->id, ntohl(h->offset), homa_data_len(skb),
 			   rpc->msgin.granted);
 #else /* See strip.py */
 		tt_record3("Dropping packet because no buffer space available: id %d, offset %d, length %d",
-			   rpc->id, ntohl(h->seg.offset), homa_data_len(skb));
+			   rpc->id, ntohl(h->offset), homa_data_len(skb));
 #endif /* See strip.py */
 		INC_METRIC(dropped_data_no_bufs, homa_data_len(skb));
 		drop_reason = SKB_DROP_REASON_NOMEM;

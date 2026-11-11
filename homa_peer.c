@@ -7,8 +7,10 @@
 #include "homa_impl.h"
 #include "homa_peer.h"
 #include "homa_rpc.h"
+#include "homa_udp_tunnel.h"
 
 #include <linux/xxhash.h>
+#include <net/ip6_fib.h>
 
 #ifdef __UNIT_TEST__
 #undef rhashtable_init
@@ -353,9 +355,10 @@ struct homa_route *homa_route_alloc(struct homa_sock *hsk,
 
 		flowi4_init_output(&route->flow.u.ip4, key->bound_dev_if,
 				   key->mark, 0, RT_SCOPE_UNIVERSE,
-				   IPPROTO_HOMA, 0,
+				   IPPROTO_UDP, 0,
 				   ipv6_to_ipv4(route->key.daddr),
-				   ipv6_to_ipv4(route->key.saddr), 0, 0,
+				   ipv6_to_ipv4(route->key.saddr),
+				   htons(HOMA_UDP_PORT), htons(HOMA_UDP_PORT),
 				   key->uid);
 		rt = ip_route_output_flow(sock_net(&hsk->sock),
 					  &route->flow.u.ip4, &hsk->sock);
@@ -366,14 +369,14 @@ struct homa_route *homa_route_alloc(struct homa_sock *hsk,
 		rcu_assign_pointer(route->dst, &rt->dst);
 	} else {
 		/* This code is derived from code in tcp_v6_connect. */
-		route->flow.u.ip6.flowi6_proto = IPPROTO_HOMA;
+		route->flow.u.ip6.flowi6_proto = IPPROTO_UDP;
 		route->flow.u.ip6.daddr = route->key.daddr;
 		route->flow.u.ip6.saddr = route->key.saddr;
 		route->flow.u.ip6.flowlabel = ip6_make_flowinfo(0, 0);
 		route->flow.u.ip6.flowi6_oif = key->bound_dev_if;
 		route->flow.u.ip6.flowi6_mark = key->mark;
-		route->flow.u.ip6.fl6_dport = 0;
-		route->flow.u.ip6.fl6_sport = 0;
+		route->flow.u.ip6.fl6_dport = htons(HOMA_UDP_PORT);
+		route->flow.u.ip6.fl6_sport = htons(HOMA_UDP_PORT);
 		route->flow.u.ip6.flowi6_uid = key->uid;
 		dst = ip6_dst_lookup_flow(sock_net(&hsk->sock), &hsk->sock,
 						   &route->flow.u.ip6, NULL);
@@ -573,6 +576,22 @@ int homa_route_validate(struct homa_rpc *rpc)
 		homa_route_release(old);
 	}
 	return 0;
+}
+
+/**
+ * homa_route_xmit() - Transmit a packet according to a given route.
+ * @skb:      Packet to transmit; it is consumed.
+ * @hsk:      Socket on which to transmit packet.
+ * @route:    Route to use to transmit packet.
+ * @priority: Priority for packet.
+ */
+void homa_route_xmit(struct sk_buff *skb, struct homa_sock *hsk,
+		     struct homa_route *route, int priority)
+{
+	u8 tos = 0;
+
+	IF_NO_STRIP(tos = hsk->homa->priority_map[priority] << 5);
+	homa_udp_xmit(skb, hsk, route, tos);
 }
 
 /**
